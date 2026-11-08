@@ -1,0 +1,1776 @@
+--[[
+    AURA VISION V6 / CLEAR GLASS + ANIME MODELS + WELDED COSMETICS
+    Roblox CLIENT-SIDE Luau | Original, local-only graphics controls.
+    Toggle: INSERT. Fallback: floating AURA button.
+
+    Safe startup: no post-processing and no changes to the game's lighting
+    until the user explicitly selects a setting. No remote scripts or requests.
+    Doesn't bypass Roblox anti-cheat. No executor compatibility is guaranteed.
+]]
+
+local Players = game:GetService("Players")
+local Lighting = game:GetService("Lighting")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Stats = game:GetService("Stats")
+local TextChatService = game:GetService("TextChatService")
+
+local player = Players.LocalPlayer
+if not player then
+    warn("[AURA] LocalPlayer not available")
+    return
+end
+local playerGui = player:WaitForChild("PlayerGui")
+
+local env = _G
+if type(getgenv) == "function" then
+    local ok, result = pcall(getgenv)
+    if ok and type(result) == "table" then env = result end
+end
+if type(env.AURA_VISION_V6_CLEANUP) == "function" then
+    pcall(env.AURA_VISION_V6_CLEANUP)
+end
+if type(env.AURA_VISION_V5_CLEANUP) == "function" then
+    pcall(env.AURA_VISION_V5_CLEANUP)
+end
+if type(env.AURA_VISION_V4_CLEANUP) == "function" then
+    pcall(env.AURA_VISION_V4_CLEANUP)
+end
+if type(env.AURA_VISION_V3_CLEANUP) == "function" then
+    pcall(env.AURA_VISION_V3_CLEANUP)
+end
+-- Remove previous versions of the UI/effects before starting V5.
+if type(env.AURA_VISION_V2_CLEANUP) == "function" then
+    pcall(env.AURA_VISION_V2_CLEANUP)
+end
+if type(env.AURA_VISION_CLEANUP) == "function" then
+    pcall(env.AURA_VISION_CLEANUP)
+end
+
+local running = true
+local connections, runningTweens, spawnedEffects = {}, {}, {}
+local originalLighting = {}
+local lightingKeys = {
+    "ClockTime", "Brightness", "Ambient", "OutdoorAmbient", "ExposureCompensation",
+    "FogStart", "FogEnd", "FogColor", "GlobalShadows", "ShadowSoftness",
+    "ColorShift_Top", "ColorShift_Bottom",
+}
+local function safeSet(instance, property, value)
+    if not instance then return false end
+    return pcall(function() instance[property] = value end)
+end
+for _, key in ipairs(lightingKeys) do
+    local ok, value = pcall(function() return Lighting[key] end)
+    if ok then originalLighting[key] = value end
+end
+local firstCamera = workspace.CurrentCamera
+local firstCameraFOV = firstCamera and firstCamera.FieldOfView or 70
+
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(connections, connection)
+    return connection
+end
+
+local function setTween(instance, duration, props, easing)
+    if not running or not instance then return end
+    if runningTweens[instance] then
+        pcall(function() runningTweens[instance]:Cancel() end)
+    end
+    local ok, result = pcall(function()
+        local item = TweenService:Create(instance, TweenInfo.new(duration, easing or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+        item:Play()
+        return item
+    end)
+    if ok then runningTweens[instance] = result end
+    return ok and result or nil
+end
+
+local state = {
+    opened = false, page = "Overview", preset = "Original", theme = "CrystalGlass",
+    reduceMotion = false, menuBlur = false, dimBackground = true,
+    uiOpacity = .32, uiScale = 1,
+    bloom = false, rays = false, grade = false, dof = false, haze = false,
+    bloomIntensity = .25, bloomSize = 28, raysIntensity = .06,
+    saturation = .12, contrast = .10, tint = 0, gradeBrightness = 0,
+    nearBlur = .08, farBlur = .13, focusDistance = 70,
+    hazeDensity = .18, hazeGlare = .2,
+    customLighting = false, brightness = 2, exposure = 0, time = 14,
+    fogDistance = 3000, shadowSoftness = .3,
+    customFOV = false, fov = firstCameraFOV, smoothFOV = true,
+    fpsHUD = false, hideFloatingButton = false, compactMotion = false,
+    skin = "Original", wings = "None", wingSpeed = 1, wingSpread = 1,
+    acceptSharedLooks = true,
+    model = "None", modelScale = 1, modelAnimate = true,
+}
+
+local palette = {
+    CrystalGlass = Color3.fromRGB(235, 243, 252),
+    Arctic = Color3.fromRGB(93, 221, 252),
+    Amethyst = Color3.fromRGB(180, 145, 255),
+    Rose = Color3.fromRGB(255, 135, 184),
+    Emerald = Color3.fromRGB(108, 232, 179),
+    Sunset = Color3.fromRGB(255, 185, 109),
+}
+local shades = {
+    bg = Color3.fromRGB(32, 36, 43),
+    sidebar = Color3.fromRGB(39, 43, 50),
+    card = Color3.fromRGB(94, 100, 111),
+    white = Color3.fromRGB(248, 250, 252),
+    muted = Color3.fromRGB(193, 199, 208),
+    border = Color3.fromRGB(226, 234, 244),
+    green = Color3.fromRGB(117, 236, 187),
+}
+local function accent() return palette[state.theme] or palette.CrystalGlass end
+local accented = {}
+local function trackAccent(object, property)
+    table.insert(accented, {object = object, property = property})
+    safeSet(object, property, accent())
+    return object
+end
+local function refreshAccent()
+    for _, entry in ipairs(accented) do
+        if entry.object and entry.object.Parent then
+            safeSet(entry.object, entry.property, accent())
+        end
+    end
+end
+
+local function restoreLighting()
+    for property, value in pairs(originalLighting) do safeSet(Lighting, property, value) end
+end
+local function makeEffect(id, className)
+    local old = spawnedEffects[id]
+    if old and old.Parent then return old end
+    local ok, created = pcall(function()
+        local item = Instance.new(className)
+        item.Name = "AURA_V2_" .. id
+        item.Parent = Lighting
+        return item
+    end)
+    if ok then spawnedEffects[id] = created; return created end
+    warn("[AURA] Cannot create effect " .. tostring(className))
+    return nil
+end
+local function toggleEffect(id, className, enabled)
+    if not enabled then
+        local instance = spawnedEffects[id]
+        if instance then
+            if className == "Atmosphere" then
+                pcall(function() instance:Destroy() end)
+                spawnedEffects[id] = nil
+            else
+                safeSet(instance, "Enabled", false)
+            end
+        end
+        return nil
+    end
+    local instance = makeEffect(id, className)
+    if className ~= "Atmosphere" then safeSet(instance, "Enabled", true) end
+    return instance
+end
+
+local PRESETS = {
+    {key="Original", title="Original", desc="No lighting changes", color=Color3.fromRGB(107, 125, 153)},
+    {key="Cinematic", title="Cinematic", desc="Clean film-style contrast", color=Color3.fromRGB(105, 164, 224), time=14, bright=2.2, exp=.04,
+        ambient=Color3.fromRGB(117, 130, 151), outdoor=Color3.fromRGB(153, 172, 200), fog=27000, fogColor=Color3.fromRGB(179, 203, 230)},
+    {key="Crystal", title="Crystal Day", desc="Clear cool daylight", color=Color3.fromRGB(99, 219, 246), time=12.5, bright=2.9, exp=.07,
+        ambient=Color3.fromRGB(127, 158, 190), outdoor=Color3.fromRGB(185, 208, 237), fog=42000, fogColor=Color3.fromRGB(204, 230, 255)},
+    {key="Golden", title="Golden Hour", desc="Warm afternoon sunshine", color=Color3.fromRGB(245, 176, 110), time=17.3, bright=2.4, exp=.06,
+        ambient=Color3.fromRGB(179, 124, 106), outdoor=Color3.fromRGB(222, 164, 117), fog=25000, fogColor=Color3.fromRGB(251, 208, 170)},
+    {key="Midnight", title="Midnight Violet", desc="Deep purple night ambience", color=Color3.fromRGB(134, 117, 245), time=22, bright=1.6, exp=-.02,
+        ambient=Color3.fromRGB(75, 70, 119), outdoor=Color3.fromRGB(109, 106, 164), fog=18000, fogColor=Color3.fromRGB(59, 65, 111)},
+    {key="Frost", title="Frosted Blue", desc="Cool winter-like lighting", color=Color3.fromRGB(141, 218, 248), time=10, bright=2.5, exp=.02,
+        ambient=Color3.fromRGB(126, 163, 191), outdoor=Color3.fromRGB(168, 208, 232), fog=23000, fogColor=Color3.fromRGB(201, 231, 247)},
+    {key="Dusk", title="Soft Dusk", desc="Dreamy pink horizon", color=Color3.fromRGB(236, 146, 195), time=18.7, bright=2.0, exp=.03,
+        ambient=Color3.fromRGB(141, 105, 159), outdoor=Color3.fromRGB(209, 152, 182), fog=21000, fogColor=Color3.fromRGB(239, 188, 218)},
+    {key="Neutral", title="Neutral Studio", desc="Subtle balanced lighting", color=Color3.fromRGB(159, 188, 213), time=13, bright=2.0, exp=0,
+        ambient=Color3.fromRGB(132, 137, 148), outdoor=Color3.fromRGB(176, 181, 191), fog=100000, fogColor=Color3.fromRGB(194, 204, 216)},
+}
+
+local function applyLighting()
+    -- Never repeatedly modify lighting every frame: some games manage it themselves.
+    restoreLighting()
+    if state.preset ~= "Original" then
+        for _, preset in ipairs(PRESETS) do
+            if preset.key == state.preset then
+                safeSet(Lighting, "ClockTime", preset.time)
+                safeSet(Lighting, "Brightness", preset.bright)
+                safeSet(Lighting, "ExposureCompensation", preset.exp)
+                safeSet(Lighting, "Ambient", preset.ambient)
+                safeSet(Lighting, "OutdoorAmbient", preset.outdoor)
+                safeSet(Lighting, "FogEnd", preset.fog)
+                safeSet(Lighting, "FogColor", preset.fogColor)
+                break
+            end
+        end
+    end
+    if state.customLighting then
+        safeSet(Lighting, "ClockTime", state.time)
+        safeSet(Lighting, "Brightness", state.brightness)
+        safeSet(Lighting, "ExposureCompensation", state.exposure)
+        safeSet(Lighting, "FogEnd", state.fogDistance)
+        safeSet(Lighting, "ShadowSoftness", state.shadowSoftness)
+    end
+end
+local function refreshEffects()
+    local bloom = toggleEffect("Bloom", "BloomEffect", state.bloom)
+    if bloom then
+        safeSet(bloom, "Intensity", state.bloomIntensity)
+        safeSet(bloom, "Size", math.floor(state.bloomSize + .5))
+        safeSet(bloom, "Threshold", 1.1)
+    end
+    local rays = toggleEffect("SunRays", "SunRaysEffect", state.rays)
+    if rays then
+        safeSet(rays, "Intensity", state.raysIntensity)
+        safeSet(rays, "Spread", .78)
+    end
+    local color = toggleEffect("Grade", "ColorCorrectionEffect", state.grade)
+    if color then
+        local warmth = state.tint
+        local tint
+        if warmth >= 0 then
+            tint = Color3.new(1, 1 - warmth * .18, 1 - warmth * .33)
+        else
+            tint = Color3.new(1 + warmth * .30, 1 + warmth * .10, 1)
+        end
+        safeSet(color, "TintColor", tint)
+        safeSet(color, "Contrast", state.contrast)
+        safeSet(color, "Saturation", state.saturation)
+        safeSet(color, "Brightness", state.gradeBrightness)
+    end
+    local depth = toggleEffect("DoF", "DepthOfFieldEffect", state.dof)
+    if depth then
+        safeSet(depth, "NearIntensity", state.nearBlur)
+        safeSet(depth, "FarIntensity", state.farBlur)
+        safeSet(depth, "FocusDistance", state.focusDistance)
+        safeSet(depth, "InFocusRadius", 40)
+    end
+    local haze = toggleEffect("Atmosphere", "Atmosphere", state.haze)
+    if haze then
+        safeSet(haze, "Density", state.hazeDensity)
+        safeSet(haze, "Offset", 0)
+        safeSet(haze, "Haze", 1.2)
+        safeSet(haze, "Glare", state.hazeGlare)
+        safeSet(haze, "Color", Color3.fromRGB(198, 215, 245))
+        safeSet(haze, "Decay", Color3.fromRGB(112, 133, 175))
+    end
+end
+local function applyFOV()
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    local nextFov = state.customFOV and state.fov or firstCameraFOV
+    if state.smoothFOV and not state.reduceMotion then
+        setTween(camera, .35, {FieldOfView = nextFov})
+    else
+        safeSet(camera, "FieldOfView", nextFov)
+    end
+end
+
+local function make(class, props, parent)
+    local obj = Instance.new(class)
+    for key, value in pairs(props or {}) do obj[key] = value end
+    obj.Parent = parent
+    return obj
+end
+local function corner(parent, radius)
+    return make("UICorner", {CornerRadius=UDim.new(0,radius)}, parent)
+end
+local function border(parent, color, alpha, thickness)
+    return make("UIStroke", {Color=color or shades.border, Transparency=alpha or .75, Thickness=thickness or 1}, parent)
+end
+local function text(parent, content, fontSize, bold, color, props)
+    local options = {
+        BackgroundTransparency=1, Text=content,
+        TextColor3=color or shades.white,
+        Font=bold and Enum.Font.GothamBold or Enum.Font.Gotham,
+        TextSize=fontSize, TextXAlignment=Enum.TextXAlignment.Left,
+        TextYAlignment=Enum.TextYAlignment.Center,
+        TextTruncate=Enum.TextTruncate.AtEnd,
+    }
+    for k,v in pairs(props or {}) do options[k]=v end
+    return make("TextLabel", options, parent)
+end
+local function button(parent, title, size)
+    local b = make("TextButton", {
+        Size=size, BackgroundColor3=shades.card, BackgroundTransparency=.12,
+        Text=title, TextColor3=shades.white, TextSize=12, Font=Enum.Font.GothamBold,
+        BorderSizePixel=0, AutoButtonColor=false,
+    }, parent)
+    corner(b, 11)
+    border(b, shades.border, .82)
+    connect(b.MouseEnter, function()
+        setTween(b, state.reduceMotion and 0 or .18, {BackgroundTransparency=.01})
+    end)
+    connect(b.MouseLeave, function()
+        setTween(b, state.reduceMotion and 0 or .18, {BackgroundTransparency=.12})
+    end)
+    return b
+end
+
+-- GUI is initially closed: avoids enabling graphical effects at injection time.
+local previousGui = playerGui:FindFirstChild("AURA_VISION_V6") or playerGui:FindFirstChild("AURA_VISION_V4")
+if previousGui then previousGui:Destroy() end
+local gui = make("ScreenGui", {
+    Name="AURA_VISION_V6", ResetOnSpawn=false, IgnoreGuiInset=true,
+    DisplayOrder=500, ZIndexBehavior=Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+local overlay = make("TextButton", {
+    Name="Backdrop", Size=UDim2.fromScale(1,1), Visible=false,
+    BackgroundColor3=Color3.fromRGB(14,15,19), BackgroundTransparency=1,
+    BorderSizePixel=0, Text="", AutoButtonColor=false,
+}, gui)
+-- Floating bottom dock: translucent neutral glass, ping + clickable central A + FPS.
+local mini = make("Frame", {
+    Name="AuraGlassDock", AnchorPoint=Vector2.new(.5,1),
+    Position=UDim2.new(.5,0,1,-28), Size=UDim2.fromOffset(306,54),
+    BackgroundColor3=Color3.fromRGB(44,48,56), BackgroundTransparency=.26,
+    BorderSizePixel=0, Active=true,
+}, gui)
+corner(mini,23)
+border(mini,Color3.fromRGB(240,245,255),.38,1.1)
+make("UIGradient",{
+    Color=ColorSequence.new(Color3.fromRGB(90,96,106),Color3.fromRGB(27,32,39)),
+    Rotation=120,
+},mini)
+local miniScale = make("UIScale", {Scale=1}, mini)
+local dockFPS = text(mini,"FPS  --",12,true,shades.white,{
+    Position=UDim2.fromOffset(211,2),Size=UDim2.fromOffset(87,50),
+    TextXAlignment=Enum.TextXAlignment.Center,
+})
+local dockPing = text(mini,"PING  --",12,true,shades.white,{
+    Position=UDim2.fromOffset(9,2),Size=UDim2.fromOffset(92,50),
+    TextXAlignment=Enum.TextXAlignment.Center,
+})
+local dockLogo = make("TextButton",{
+    Name="OpenMenu",AnchorPoint=Vector2.new(.5,.5),
+    Position=UDim2.fromScale(.5,.5),Size=UDim2.fromOffset(49,43),
+    BackgroundColor3=Color3.fromRGB(200,207,217),BackgroundTransparency=.77,
+    BorderSizePixel=0,Text="A",TextSize=24,Font=Enum.Font.GothamBold,
+    TextColor3=Color3.fromRGB(250,252,255),AutoButtonColor=false,
+},mini)
+corner(dockLogo,16)
+border(dockLogo,Color3.fromRGB(247,248,252),.43,1)
+local panel = make("Frame", {
+    Name="LiquidGlassPanel", AnchorPoint=Vector2.new(.5,.5),
+    Position=UDim2.new(.5,0,.5,12), Size=UDim2.fromOffset(800,530),
+    BackgroundColor3=shades.bg, BackgroundTransparency=state.uiOpacity,
+    BorderSizePixel=0, Visible=false, ClipsDescendants=true,
+}, gui)
+corner(panel, 23)
+border(panel, shades.border, .55, 1.2)
+local panelScale = make("UIScale", {Scale=.96}, panel)
+make("UIGradient", {
+    Color=ColorSequence.new(Color3.fromRGB(72,76,84), Color3.fromRGB(25,30,38)),
+    Rotation=120,
+}, panel)
+local topLine = make("Frame", {
+    Position=UDim2.fromOffset(14,5), Size=UDim2.new(1,-28,0,2),
+    BackgroundColor3=accent(), BackgroundTransparency=.32, BorderSizePixel=0,
+}, panel)
+corner(topLine, 2)
+trackAccent(topLine, "BackgroundColor3")
+
+local side = make("Frame", {
+    Position=UDim2.fromOffset(0,0), Size=UDim2.fromOffset(210,530),
+    BackgroundColor3=shades.sidebar, BackgroundTransparency=.47,
+    BorderSizePixel=0,
+}, panel)
+make("Frame", {
+    Position=UDim2.new(1,-1,0,0), Size=UDim2.new(0,1,1,0),
+    BackgroundColor3=shades.border, BackgroundTransparency=.86, BorderSizePixel=0,
+}, side)
+text(side,"AURA",26,true,shades.white,{Position=UDim2.fromOffset(22,23), Size=UDim2.fromOffset(120,34)})
+trackAccent(text(side,"VISION  /  V6",10,true,accent(),{Position=UDim2.fromOffset(23,55), Size=UDim2.fromOffset(165,20)}),"TextColor3")
+text(side,"LIQUID GLASS SUITE",9,false,shades.muted,{Position=UDim2.fromOffset(23,80),Size=UDim2.fromOffset(164,17)})
+
+local navScroll = make("ScrollingFrame", {
+    Position=UDim2.fromOffset(12,116), Size=UDim2.fromOffset(187,330),
+    BackgroundTransparency=1, BorderSizePixel=0,
+    CanvasSize=UDim2.fromOffset(0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+    ScrollBarThickness=2, ScrollBarImageColor3=accent(),
+    ScrollingDirection=Enum.ScrollingDirection.Y,
+}, side)
+make("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,5)},navScroll)
+make("UIPadding", {PaddingBottom=UDim.new(0,8),PaddingRight=UDim.new(0,7)},navScroll)
+trackAccent(navScroll,"ScrollBarImageColor3")
+local sideFooter = make("Frame", {
+    Position=UDim2.fromOffset(17,475), Size=UDim2.fromOffset(178,36),
+    BackgroundColor3=shades.card,BackgroundTransparency=.26,BorderSizePixel=0,
+}, side)
+corner(sideFooter,10)
+trackAccent(text(sideFooter,"●",14,true,accent(),{Position=UDim2.fromOffset(12,0),Size=UDim2.fromOffset(17,36)}),"TextColor3")
+local footStatus = text(sideFooter,"SAFE MODE READY",10,true,shades.white,{Position=UDim2.fromOffset(32,0),Size=UDim2.fromOffset(144,36)})
+
+local title = text(panel,"Overview",25,true,shades.white,{Position=UDim2.fromOffset(236,24),Size=UDim2.fromOffset(425,37)})
+local subtitle = text(panel,"Your client-side graphics workspace",12,false,shades.muted,{Position=UDim2.fromOffset(237,60),Size=UDim2.fromOffset(505,22)})
+local close = button(panel,"×",UDim2.fromOffset(33,31))
+close.Position=UDim2.new(1,-50,0,29)
+close.TextSize=19
+
+local tag = make("Frame", {
+    Position=UDim2.fromOffset(236,99),Size=UDim2.fromOffset(179,25),
+    BackgroundColor3=Color3.fromRGB(60,76,73),BackgroundTransparency=.35,BorderSizePixel=0,
+},panel)
+corner(tag,11)
+text(tag,"●   LOCAL VISUALS ONLY",10,true,shades.green,{Position=UDim2.fromOffset(12,0),Size=UDim2.new(1,-17,1,0)})
+local fpsFooter = text(panel,"FPS  --",10,true,shades.muted,{Position=UDim2.fromOffset(237,504),Size=UDim2.fromOffset(125,16)})
+text(panel,"INSERT  ·  SHOW / HIDE",10,false,shades.muted,{Position=UDim2.fromOffset(560,504),Size=UDim2.fromOffset(207,16),TextXAlignment=Enum.TextXAlignment.Right})
+make("Frame", {Position=UDim2.fromOffset(236,494),Size=UDim2.fromOffset(530,1),BackgroundColor3=shades.border,BackgroundTransparency=.85,BorderSizePixel=0},panel)
+
+local pages = {}
+local pageOrders = {}
+local meta = {
+    Overview={"Control Center","Quick actions and current status","◈"},
+    Presets={"Scene Presets","Pick a lighting atmosphere","◉"},
+    Lighting={"Advanced Lighting","Control the world lighting locally","☀"},
+    Effects={"Post-processing","Lighting, focus and atmosphere","✦"},
+    Colors={"Color Laboratory","Tune cinematic color grading","◐"},
+    Camera={"Camera Studio","Field of view and photo mode","⌗"},
+    Interface={"Glass Interface","Themes, opacity and animation","◫"},
+    Performance={"Performance","Keep visual effects under control","▥"},
+    Diagnostics={"Diagnostics","See performance and safe options","◌"},
+    Skins={"Skins Studio","Locally change your avatar look","◇"},
+    Wings={"Wings Collection","Animated cosmetic wings","✧"},
+    Models={"Wearable Models","Anime outfits and 3D character suits","⬡"},
+    Sharing={"Look Sharing","Opt-in chat codes for other AURA users","◎"},
+}
+local pageList = {"Overview","Presets","Lighting","Effects","Colors","Camera","Skins","Wings","Models","Sharing","Interface","Performance","Diagnostics"}
+local tabRefresh, sliderRefresh, switchRefresh, presetRefresh, themeRefresh = {}, {}, {}, {}, {}
+local pageBuilders, pageBuilt = {}, {}
+
+for _, name in ipairs(pageList) do
+    local scroll = make("ScrollingFrame", {
+        Name=name, Position=UDim2.fromOffset(234,143),Size=UDim2.fromOffset(542,339),
+        BackgroundTransparency=1,BorderSizePixel=0,
+        CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=3,ScrollBarImageColor3=accent(),
+        ScrollingDirection=Enum.ScrollingDirection.Y,
+        Visible=name==state.page,
+    }, panel)
+    make("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,9)},scroll)
+    make("UIPadding",{PaddingTop=UDim.new(0,3),PaddingBottom=UDim.new(0,18),PaddingRight=UDim.new(0,9)},scroll)
+    trackAccent(scroll,"ScrollBarImageColor3")
+    pages[name]=scroll
+    pageOrders[name]=0
+end
+local function orderFor(name)
+    pageOrders[name] = pageOrders[name]+1
+    return pageOrders[name]
+end
+local function switchPage(name)
+    if not pages[name] then return end
+    if not pageBuilt[name] then
+        pageBuilt[name] = true
+        local build = pageBuilders[name]
+        if build then
+            local ok, err = pcall(build)
+            if not ok then warn("[AURA] Page " .. name .. ": " .. tostring(err)) end
+        end
+    end
+    state.page=name
+    for pageName, scroller in pairs(pages) do
+        if pageName==name then
+            scroller.Visible=true
+            scroller.CanvasPosition=Vector2.new(0,0)
+            if not state.reduceMotion then
+                scroller.Position=UDim2.fromOffset(247,151)
+                setTween(scroller,.25,{Position=UDim2.fromOffset(234,143)},Enum.EasingStyle.Quint)
+            else
+                scroller.Position=UDim2.fromOffset(234,143)
+            end
+        else
+            scroller.Visible=false
+        end
+    end
+    title.Text=meta[name][1]
+    subtitle.Text=meta[name][2]
+    for _, cb in pairs(tabRefresh) do cb() end
+end
+for index,name in ipairs(pageList) do
+    local entry=make("TextButton",{
+        LayoutOrder=index,Size=UDim2.new(1,-4,0,38),
+        BackgroundTransparency=1,BackgroundColor3=shades.card,
+        Text="",AutoButtonColor=false,BorderSizePixel=0,
+    },navScroll)
+    corner(entry,10)
+    local iconText=trackAccent(text(entry,meta[name][3],18,true,accent(),{Position=UDim2.fromOffset(13,0),Size=UDim2.fromOffset(27,38),TextXAlignment=Enum.TextXAlignment.Center}),"TextColor3")
+    local navText=text(entry,name,12,true,shades.muted,{Position=UDim2.fromOffset(49,0),Size=UDim2.new(1,-52,1,0)})
+    local function redraw()
+        local active=state.page==name
+        entry.BackgroundTransparency=active and .21 or 1
+        navText.TextColor3=active and shades.white or shades.muted
+        iconText.TextTransparency=active and 0 or .24
+    end
+    tabRefresh[name]=redraw
+    connect(entry.MouseButton1Click,function() switchPage(name) end)
+    connect(entry.MouseEnter,function()
+        if state.page~=name then setTween(entry,.17,{BackgroundTransparency=.68}) end
+    end)
+    connect(entry.MouseLeave,function() redraw() end)
+    redraw()
+end
+
+local function makeCard(pageName,height)
+    local item=make("Frame",{
+        LayoutOrder=orderFor(pageName),Size=UDim2.new(1,-3,0,height),
+        BackgroundColor3=shades.card,BackgroundTransparency=.50,
+        BorderSizePixel=0,
+    },pages[pageName])
+    corner(item,14)
+    border(item,shades.border,.89,1)
+    return item
+end
+local function section(pageName,titleText,caption)
+    local item=make("Frame",{
+        LayoutOrder=orderFor(pageName),Size=UDim2.new(1,-4,0,caption and 48 or 29),
+        BackgroundTransparency=1,BorderSizePixel=0,
+    },pages[pageName])
+    text(item,titleText,15,true,shades.white,{Position=UDim2.fromOffset(4,1),Size=UDim2.new(1,-8,0,24)})
+    if caption then text(item,caption,10,false,shades.muted,{Position=UDim2.fromOffset(4,26),Size=UDim2.new(1,-8,0,17)}) end
+    return item
+end
+local function note(pageName,headline,copy)
+    local item=makeCard(pageName,69)
+    trackAccent(text(item,headline,13,true,accent(),{Position=UDim2.fromOffset(15,8),Size=UDim2.new(1,-28,0,23)}),"TextColor3")
+    text(item,copy,11,false,shades.muted,{Position=UDim2.fromOffset(15,31),Size=UDim2.new(1,-30,0,27),TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top})
+    return item
+end
+local function action(pageName,headline,description,caption,fn)
+    local card=makeCard(pageName,74)
+    text(card,headline,13,true,shades.white,{Position=UDim2.fromOffset(14,7),Size=UDim2.new(1,-155,0,24)})
+    text(card,description,10,false,shades.muted,{Position=UDim2.fromOffset(14,29),Size=UDim2.new(1,-155,0,34),TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top})
+    local btn=button(card,caption,UDim2.fromOffset(126,34))
+    btn.Position=UDim2.new(1,-140,.5,-17)
+    connect(btn.MouseButton1Click,fn)
+    return card
+end
+local refreshModelSize = function() end
+local onStateChange = function() end
+local function addToggle(pageName,key,headline,description)
+    local card=makeCard(pageName,67)
+    text(card,headline,13,true,shades.white,{Position=UDim2.fromOffset(14,8),Size=UDim2.new(1,-102,0,22)})
+    text(card,description,10,false,shades.muted,{Position=UDim2.fromOffset(14,31),Size=UDim2.new(1,-105,0,23)})
+    local hit=make("TextButton",{
+        Position=UDim2.new(1,-67,.5,-15),Size=UDim2.fromOffset(54,30),
+        BackgroundColor3=shades.card,BorderSizePixel=0,Text="",AutoButtonColor=false,
+    },card)
+    corner(hit,16)
+    local knob=make("Frame",{Size=UDim2.fromOffset(22,22),Position=UDim2.fromOffset(4,4),BackgroundColor3=shades.white,BorderSizePixel=0},hit)
+    corner(knob,12)
+    local function draw(animate)
+        local active=not not state[key]
+        local bg=active and accent() or Color3.fromRGB(63,74,99)
+        local pos=active and UDim2.fromOffset(28,4) or UDim2.fromOffset(4,4)
+        if animate and not state.reduceMotion then
+            setTween(hit,.21,{BackgroundColor3=bg})
+            setTween(knob,.21,{Position=pos})
+        else
+            hit.BackgroundColor3=bg;knob.Position=pos
+        end
+    end
+    switchRefresh[key]=draw
+    connect(hit.MouseButton1Click,function()
+        state[key]=not state[key]
+        onStateChange(key)
+        draw(true)
+    end)
+    draw(false)
+    return card
+end
+local function addSlider(pageName,key,headline,description,minValue,maxValue,format)
+    local card=makeCard(pageName,90)
+    text(card,headline,13,true,shades.white,{Position=UDim2.fromOffset(14,7),Size=UDim2.new(1,-125,0,21)})
+    local valueText=trackAccent(text(card,"",12,true,accent(),{Position=UDim2.new(1,-111,0,8),Size=UDim2.fromOffset(96,20),TextXAlignment=Enum.TextXAlignment.Right}),"TextColor3")
+    text(card,description,10,false,shades.muted,{Position=UDim2.fromOffset(14,29),Size=UDim2.new(1,-26,0,18)})
+    local track=make("Frame",{
+        Position=UDim2.fromOffset(18,70),Size=UDim2.new(1,-36,0,5),
+        BackgroundColor3=Color3.fromRGB(64,76,96),BorderSizePixel=0,
+    },card)
+    corner(track,3)
+    local fill=trackAccent(make("Frame",{
+        Size=UDim2.fromScale(.5,1),BackgroundColor3=accent(),BorderSizePixel=0,
+    },track),"BackgroundColor3")
+    corner(fill,3)
+    local dot=make("Frame",{
+        AnchorPoint=Vector2.new(.5,.5),Size=UDim2.fromOffset(15,15),
+        Position=UDim2.fromScale(.5,.5),BackgroundColor3=shades.white,BorderSizePixel=0,
+    },track)
+    corner(dot,10)
+    local target=make("TextButton",{
+        Position=UDim2.new(0,-6,.5,-12),Size=UDim2.new(1,12,0,24),
+        BackgroundTransparency=1,Text="",AutoButtonColor=false,
+    },track)
+    local dragging=false
+    local pointer=nil
+    local function redraw()
+        local pct=math.clamp((state[key]-minValue)/(maxValue-minValue),0,1)
+        fill.Size=UDim2.fromScale(pct,1)
+        dot.Position=UDim2.fromScale(pct,.5)
+        valueText.Text=format(state[key])
+    end
+    sliderRefresh[key]=redraw
+    local function fromX(x)
+        local w=track.AbsoluteSize.X
+        if w<1 then return end
+        local fraction=math.clamp((x-track.AbsolutePosition.X)/w,0,1)
+        state[key]=minValue+(maxValue-minValue)*fraction
+        redraw()
+        onStateChange(key)
+    end
+    connect(target.InputBegan,function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            dragging=true
+            pointer=input.UserInputType==Enum.UserInputType.Touch and input or nil
+            fromX(input.Position.X)
+        end
+    end)
+    connect(UserInputService.InputChanged,function(input)
+        if not dragging then return end
+        if (pointer and input==pointer) or (not pointer and input.UserInputType==Enum.UserInputType.MouseMovement) then
+            fromX(input.Position.X)
+        end
+    end)
+    connect(UserInputService.InputEnded,function(input)
+        if not dragging then return end
+        if (pointer and input==pointer) or (not pointer and input.UserInputType==Enum.UserInputType.MouseButton1) then
+            dragging=false;pointer=nil
+        end
+    end)
+    redraw()
+    return card
+end
+local function pct(v) return tostring(math.floor(v*100+.5)).."%" end
+local function signed(v) return string.format("%+.2f",v) end
+local function number1(v) return string.format("%.1f",v) end
+local function integer(v) return tostring(math.floor(v+.5)) end
+local function refreshUI()
+    for _,redraw in pairs(switchRefresh) do redraw(false) end
+    for _,redraw in pairs(sliderRefresh) do redraw() end
+    for _,redraw in pairs(presetRefresh) do redraw() end
+    for _,redraw in pairs(themeRefresh) do redraw() end
+    refreshAccent()
+end
+
+-- The menu animation is independent of the graphical post-processing effects.
+local viewportScale=1
+local function recalcScale()
+    local camera=workspace.CurrentCamera
+    if not camera then return end
+    local v=camera.ViewportSize
+    viewportScale=math.clamp(math.min(1,(v.X-30)/814,(v.Y-32)/543),.43,1)
+    if not state.opened then panelScale.Scale=viewportScale*state.uiScale*.96 end
+end
+local function applyBackdrop()
+    panel.BackgroundTransparency=state.uiOpacity
+    if state.opened then
+        if state.dimBackground then
+            overlay.Visible=true
+            local target=.69
+            if state.reduceMotion then overlay.BackgroundTransparency=target
+            else setTween(overlay,.25,{BackgroundTransparency=target}) end
+        else
+            overlay.BackgroundTransparency=1
+            overlay.Visible=false
+        end
+    else
+        overlay.BackgroundTransparency=1
+    end
+    local amount=(state.opened and state.menuBlur) and 6 or 0
+    if amount>0 then
+        local instance=makeEffect("MenuBlur","BlurEffect")
+        if instance then
+            safeSet(instance,"Enabled",true)
+            if state.reduceMotion then safeSet(instance,"Size",amount)
+            else setTween(instance,.23,{Size=amount}) end
+        end
+    else
+        local instance=spawnedEffects.MenuBlur
+        if instance then
+            safeSet(instance,"Size",0)
+            safeSet(instance,"Enabled",false)
+        end
+    end
+end
+local function setOpened(value)
+    if not running then return end
+    state.opened=not not value
+    local targetScale=viewportScale*state.uiScale
+    if state.opened then
+        panel.Visible=true
+        panelScale.Scale=targetScale*(state.reduceMotion and 1 or .94)
+        panel.Position=UDim2.new(.5,0,.5,state.reduceMotion and 0 or 12)
+        if state.reduceMotion then
+            panelScale.Scale=targetScale
+            panel.Position=UDim2.new(.5,0,.5,0)
+        else
+            setTween(panelScale,.32,{Scale=targetScale},Enum.EasingStyle.Back)
+            setTween(panel,.32,{Position=UDim2.new(.5,0,.5,0)})
+        end
+        applyBackdrop()
+    else
+        applyBackdrop()
+        if state.reduceMotion then
+            panel.Visible=false
+            overlay.Visible=false
+        else
+            local tw=setTween(panelScale,.18,{Scale=targetScale*.96})
+            setTween(panel,.18,{Position=UDim2.new(.5,0,.5,10)})
+            if tw then
+                local c
+                c=tw.Completed:Connect(function()
+                    if c then c:Disconnect() end
+                    if running and not state.opened then
+                        panel.Visible=false;overlay.Visible=false
+                    end
+                end)
+                table.insert(connections,c)
+            else
+                panel.Visible=false;overlay.Visible=false
+            end
+        end
+    end
+end
+
+local toastFrame=make("Frame",{
+    AnchorPoint=Vector2.new(.5,1),Position=UDim2.new(.5,0,1,-26),
+    Size=UDim2.fromOffset(340,44),BackgroundColor3=shades.card,
+    BackgroundTransparency=.12,BorderSizePixel=0,Visible=false,
+},gui)
+corner(toastFrame,14)
+trackAccent(border(toastFrame,accent(),.4,1),"Color")
+local toastLabel=text(toastFrame,"",12,true,shades.white,{Position=UDim2.fromOffset(15,0),Size=UDim2.new(1,-30,1,0),TextXAlignment=Enum.TextXAlignment.Center})
+local toastSerial=0
+local function toast(message)
+    if not running then return end
+    toastSerial=toastSerial+1
+    local id=toastSerial
+    toastLabel.Text=message
+    toastFrame.Visible=true
+    toastFrame.BackgroundTransparency=.1
+    task.delay(2.2,function()
+        if not running or id~=toastSerial then return end
+        if state.reduceMotion then toastFrame.Visible=false
+        else
+            local tw=setTween(toastFrame,.24,{BackgroundTransparency=1})
+            if tw then
+                local c
+                c=tw.Completed:Connect(function()
+                    if c then c:Disconnect() end
+                    if running and id==toastSerial then toastFrame.Visible=false end
+                end)
+                table.insert(connections,c)
+            end
+        end
+    end)
+end
+
+local fpsHUD=make("Frame",{
+    Position=UDim2.fromOffset(16,75),Size=UDim2.fromOffset(110,35),
+    BackgroundColor3=shades.bg,BackgroundTransparency=.2,
+    BorderSizePixel=0,Visible=false,
+},gui)
+corner(fpsHUD,11)
+trackAccent(border(fpsHUD,accent(),.47,1),"Color")
+local fpsHUDValue=text(fpsHUD,"FPS --",12,true,shades.white,{Size=UDim2.fromScale(1,1),TextXAlignment=Enum.TextXAlignment.Center})
+
+local function fullyRestore()
+    state.preset="Original"
+    state.customLighting=false
+    state.customFOV=false
+    state.bloom=false;state.rays=false;state.grade=false;state.dof=false;state.haze=false
+    state.menuBlur=false
+    applyLighting()
+    refreshEffects()
+    applyFOV()
+    applyBackdrop()
+    footStatus.Text="SAFE MODE READY"
+    refreshUI()
+end
+local function updateStatus()
+    local any=state.preset~="Original" or state.customLighting or state.customFOV
+        or state.bloom or state.rays or state.grade or state.dof or state.haze
+    footStatus.Text=any and "CUSTOM VISUALS ON" or "SAFE MODE READY"
+end
+onStateChange=function(key)
+    if key=="fpsHUD" then
+        fpsHUD.Visible=state.fpsHUD
+    elseif key=="hideFloatingButton" then
+        mini.Visible=not state.hideFloatingButton
+    elseif key=="reduceMotion" then
+        -- Reduced UI motion is applied immediately to future animations.
+        if state.reduceMotion then state.menuBlur=false end
+        applyBackdrop()
+    elseif key=="uiOpacity" or key=="menuBlur" or key=="dimBackground" then
+        applyBackdrop()
+    elseif key=="uiScale" then
+        panelScale.Scale=viewportScale*state.uiScale
+    elseif key=="modelScale" then
+        refreshModelSize()
+    elseif key=="customLighting" or key=="brightness" or key=="exposure" or key=="time" or key=="fogDistance" or key=="shadowSoftness" then
+        if key~="customLighting" then state.customLighting=true end
+        applyLighting()
+    elseif key=="customFOV" or key=="fov" or key=="smoothFOV" then
+        if key=="fov" then state.customFOV=true end
+        applyFOV()
+    elseif key=="bloom" or key=="bloomIntensity" or key=="bloomSize" or key=="rays" or key=="raysIntensity"
+        or key=="grade" or key=="saturation" or key=="contrast" or key=="tint" or key=="gradeBrightness"
+        or key=="dof" or key=="nearBlur" or key=="farBlur" or key=="focusDistance"
+        or key=="haze" or key=="hazeDensity" or key=="hazeGlare" then
+        if key=="bloomIntensity" or key=="bloomSize" then state.bloom=true end
+        if key=="raysIntensity" then state.rays=true end
+        if key=="saturation" or key=="contrast" or key=="tint" or key=="gradeBrightness" then state.grade=true end
+        if key=="nearBlur" or key=="farBlur" or key=="focusDistance" then state.dof=true end
+        if key=="hazeDensity" or key=="hazeGlare" then state.haze=true end
+        refreshEffects()
+    end
+    updateStatus()
+    refreshUI()
+end
+
+local diagFPS, diagViewport, diagStatus, diagEffects
+local unloadScript
+
+-- OVERVIEW: built only when first opened.
+pageBuilders.Overview = function()
+section("Overview","Welcome to AURA VISION V6","A quiet startup. Turn on only the effects you actually need.")
+note("Overview","SAFE STARTUP","Everything starts disabled. Open Models to equip a 3D avatar suit. Press INSERT to toggle.")
+action("Overview","Cinematic look","A balanced film-style lighting preset.","APPLY",function()
+    state.preset="Cinematic";applyLighting();refreshUI();updateStatus();toast("Cinematic preset enabled")
+end)
+action("Overview","Night mode","A violet atmosphere for evening maps.","APPLY",function()
+    state.preset="Midnight";applyLighting();refreshUI();updateStatus();toast("Midnight Violet preset enabled")
+end)
+action("Overview","Return to original","Revert all AURA visual effects and adjustments.","RESTORE",function()
+    fullyRestore();toast("Original graphics restored")
+end)
+note("Overview","IMPORTANT","These are local visual changes. Some games override lighting or camera settings.")
+end
+
+-- PRESETS: built only when first opened.
+pageBuilders.Presets = function()
+section("Presets","Choose your atmosphere","Original does not add a filter or change the time of day.")
+for _,preset in ipairs(PRESETS) do
+    local card=makeCard("Presets",67)
+    local swatch=make("Frame",{Position=UDim2.fromOffset(10,9),Size=UDim2.fromOffset(48,48),BackgroundColor3=preset.color,BorderSizePixel=0},card)
+    corner(swatch,12)
+    make("UIGradient",{Color=ColorSequence.new(preset.color,shades.card),Rotation=115},swatch)
+    text(swatch,"✦",20,true,shades.white,{Size=UDim2.fromScale(1,1),TextXAlignment=Enum.TextXAlignment.Center})
+    text(card,preset.title,14,true,shades.white,{Position=UDim2.fromOffset(73,9),Size=UDim2.new(1,-116,0,24)})
+    text(card,preset.desc,10,false,shades.muted,{Position=UDim2.fromOffset(73,34),Size=UDim2.new(1,-114,0,19)})
+    local dot=trackAccent(text(card,"○",23,true,accent(),{Position=UDim2.new(1,-38,0,18),Size=UDim2.fromOffset(28,28)}),"TextColor3")
+    local edge=trackAccent(border(card,accent(),.95,1.4),"Color")
+    local area=make("TextButton",{BackgroundTransparency=1,Size=UDim2.fromScale(1,1),Text="",AutoButtonColor=false},card)
+    local function redraw()
+        local active=state.preset==preset.key
+        dot.Text=active and "●" or "○"
+        edge.Transparency=active and .21 or .95
+    end
+    presetRefresh[preset.key]=redraw
+    connect(area.MouseButton1Click,function()
+        state.preset=preset.key
+        applyLighting()
+        updateStatus();refreshUI();toast(preset.title.." applied")
+    end)
+    redraw()
+end
+end
+
+-- LIGHTING: built only when first opened.
+pageBuilders.Lighting = function()
+section("Lighting","Lighting override","Your game may change lighting again after you set it.")
+addToggle("Lighting","customLighting","Manual lighting","Use your own time, brightness and fog values")
+addSlider("Lighting","time","Time of day","Adjust the sun position",0,24,function(v)return string.format("%02d:%02d",math.floor(v)%24,math.floor((v%1)*60))end)
+addSlider("Lighting","brightness","Brightness","Overall environmental light",0,5,number1)
+addSlider("Lighting","exposure","Exposure","Exposure compensation",-1,1,signed)
+addSlider("Lighting","fogDistance","Fog distance","Far clipping distance",250,65000,function(v)return integer(v).." studs" end)
+addSlider("Lighting","shadowSoftness","Shadow softness","Changes shadow edges when supported",0,1,pct)
+action("Lighting","Reset lighting","Restore captured game lighting values.","RESET",function()
+    state.preset="Original";state.customLighting=false
+    applyLighting();updateStatus();refreshUI();toast("Lighting restored")
+end)
+end
+
+-- EFFECTS: built only when first opened.
+pageBuilders.Effects = function()
+section("Effects","Glow & sunshine","Effects are created only after you enable them.")
+addToggle("Effects","bloom","Bloom glow","Soft light around bright objects")
+addSlider("Effects","bloomIntensity","Glow intensity","Bloom effect brightness",0,1.4,number1)
+addSlider("Effects","bloomSize","Glow radius","How wide the bloom spreads",4,56,integer)
+addToggle("Effects","rays","Sun rays","Subtle light streaks from the sun")
+addSlider("Effects","raysIntensity","Sun-ray power","Higher values can wash out the scene",0,.3,function(v)return string.format("%.2f",v)end)
+section("Effects","Lens & atmosphere")
+addToggle("Effects","dof","Depth of field","Film-like distance blur; can be demanding")
+addSlider("Effects","nearBlur","Near blur","Softens objects close to the camera",0,.5,number1)
+addSlider("Effects","farBlur","Far blur","Softens distant objects",0,.5,number1)
+addSlider("Effects","focusDistance","Focus distance","Camera focus depth",5,180,integer)
+addToggle("Effects","haze","Atmospheric haze","Adds optional depth to the world")
+addSlider("Effects","hazeDensity","Haze density","Volume of atmospheric fog",0,.55,number1)
+addSlider("Effects","hazeGlare","Atmospheric glare","Soft glow near the sun",0,2,number1)
+end
+
+-- COLORS: built only when first opened.
+pageBuilders.Colors = function()
+section("Colors","Creative color grading","Sliders automatically enable color grading.")
+addToggle("Colors","grade","Color correction","Enable the color lab's filter")
+addSlider("Colors","saturation","Saturation","Dull or rich colors",-.8,.8,signed)
+addSlider("Colors","contrast","Contrast","Balance bright and dark areas",-.5,.5,signed)
+addSlider("Colors","tint","Temperature","Cool blue to warm amber",-1,1,signed)
+addSlider("Colors","gradeBrightness","Grade brightness","Additional color-filter exposure",-.2,.2,signed)
+action("Colors","Neutral colors","Reset to no color grade.","RESET",function()
+    state.grade=false;state.saturation=0;state.contrast=0;state.tint=0;state.gradeBrightness=0
+    refreshEffects();refreshUI();updateStatus();toast("Color correction reset")
+end)
+end
+
+-- CAMERA: built only when first opened.
+pageBuilders.Camera = function()
+section("Camera","Camera tools","Only camera FOV is changed; no movement or aiming scripts.")
+addToggle("Camera","customFOV","Custom field of view","Enable the FOV setting below")
+addSlider("Camera","fov","Field of view","Higher values widen your view",45,100,function(v)return integer(v).."°" end)
+addToggle("Camera","smoothFOV","Smooth FOV transitions","Animate camera zoom instead of jumping")
+action("Camera","Restore game camera","Restore field of view from startup.","RESET",function()
+    state.customFOV=false;applyFOV();refreshUI();updateStatus();toast("Camera FOV restored")
+end)
+action("Camera","Photo mode","Hide the menu and floating button temporarily.","PHOTO",function()
+    setOpened(false)
+    mini.Visible=false
+    state.hideFloatingButton=true
+    refreshUI()
+    toast("Press INSERT to reopen AURA")
+end)
+note("Camera","Photo mode note","Use Roblox or Windows screenshot shortcuts. AURA does not save screenshots itself.")
+end
+
+-- INTERFACE: built only when first opened.
+pageBuilders.Interface = function()
+section("Interface","Clear Glass personalization","Neutral frosted glass by default, with optional color accents.")
+for _,item in ipairs({
+    {key="CrystalGlass",desc="Neutral frosted clear glass"},
+    {key="Arctic",desc="Electric ice blue"},{key="Amethyst",desc="Soft violet glow"},
+    {key="Rose",desc="Rose-pink light"},{key="Emerald",desc="Mint green"},
+    {key="Sunset",desc="Warm golden amber"},
+}) do
+    local card=makeCard("Interface",54)
+    local orb=make("Frame",{Position=UDim2.fromOffset(14,14),Size=UDim2.fromOffset(26,26),BackgroundColor3=palette[item.key],BorderSizePixel=0},card)
+    corner(orb,13)
+    text(card,item.key,13,true,shades.white,{Position=UDim2.fromOffset(53,7),Size=UDim2.fromOffset(180,22)})
+    text(card,item.desc,10,false,shades.muted,{Position=UDim2.fromOffset(54,29),Size=UDim2.fromOffset(200,16)})
+    local circle=trackAccent(text(card,"○",22,true,accent(),{Position=UDim2.new(1,-34,0,12),Size=UDim2.fromOffset(25,28)}),"TextColor3")
+    local clickable=make("TextButton",{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Text="",AutoButtonColor=false},card)
+    local function redraw()circle.Text=state.theme==item.key and "●" or "○"end
+    themeRefresh[item.key]=redraw
+    connect(clickable.MouseButton1Click,function()
+        state.theme=item.key;refreshUI();toast(item.key.." accent selected")
+    end)
+    redraw()
+end
+addSlider("Interface","uiOpacity","Glass transparency","0 = solid, 75 = more transparent",0,.75,function(v)return tostring(math.floor(v/.75*100+.5)).."%" end)
+addSlider("Interface","uiScale","Menu scale","Adjust panel size",.72,1.1,pct)
+addToggle("Interface","dimBackground","Dim behind menu","Darken the world while the panel is open")
+addToggle("Interface","menuBlur","Optional background blur","Blurs the scene behind the menu")
+addToggle("Interface","reduceMotion","Reduce animations","Use instant transitions on slower devices")
+end
+
+-- PERFORMANCE: built only when first opened.
+pageBuilders.Performance = function()
+section("Performance","Performance center","Start with a light configuration if previous versions crashed.")
+addToggle("Performance","fpsHUD","Floating FPS counter","Small performance indicator outside the panel")
+addToggle("Performance","hideFloatingButton","Hide AURA shortcut","Use INSERT to open the interface")
+action("Performance","Low-impact profile","Disable depth blur, haze, bloom and menu blur.","OPTIMIZE",function()
+    state.dof=false;state.haze=false;state.bloom=false;state.rays=false
+    state.menuBlur=false;state.reduceMotion=true
+    refreshEffects();applyBackdrop();refreshUI();updateStatus();toast("Low-impact profile applied")
+end)
+action("Performance","Minimal graphics","Restore captured graphics and switch off all effects.","MINIMAL",function()
+    fullyRestore();state.reduceMotion=true;refreshUI();toast("Minimal profile applied")
+end)
+note("Performance","FPS note","Filters can decrease FPS; these settings cannot increase hardware capabilities.")
+end
+
+-- DIAGNOSTICS: built only when first opened.
+pageBuilders.Diagnostics = function()
+section("Diagnostics","Runtime information","Local-only information for troubleshooting.")
+local diagnosticCard=makeCard("Diagnostics",112)
+diagFPS=text(diagnosticCard,"FPS: --",13,true,shades.white,{Position=UDim2.fromOffset(14,10),Size=UDim2.new(1,-28,0,23)})
+diagViewport=text(diagnosticCard,"Display: --",12,false,shades.muted,{Position=UDim2.fromOffset(14,36),Size=UDim2.new(1,-28,0,21)})
+diagStatus=text(diagnosticCard,"Status: idle",12,false,shades.muted,{Position=UDim2.fromOffset(14,61),Size=UDim2.new(1,-28,0,22)})
+diagEffects=text(diagnosticCard,"Active effects: 0",12,false,shades.muted,{Position=UDim2.fromOffset(14,86),Size=UDim2.new(1,-28,0,19)})
+action("Diagnostics","Restore visuals","Turn off added filters and revert camera and lighting.","RESTORE",function()
+    fullyRestore();toast("Visuals restored")
+end)
+action("Diagnostics","Close menu","Leave effects active while hiding the interface.","HIDE",function()
+    setOpened(false)
+end)
+action("Diagnostics","Unload AURA","Destroy this interface and restore original visuals.","UNLOAD",function()
+    if unloadScript then unloadScript() end
+end)
+note("Diagnostics","Crash troubleshooting","If Roblox closes immediately after Execute, stop using the script and inspect your Windows crash logs. A GUI script cannot repair an unstable executor.")
+end
+
+
+-- V5: wearable avatar shells, NOT floating companions.
+-- One selection covers the head, torso and limbs. Accessories remain optional.
+local MODEL_SPECS = {
+    None={label="Original body",desc="Keep your selected skin without extra 3D armor",color=Color3.fromRGB(140,150,168)},
+    Prism={label="Prism Knight",desc="Crystalline full-body armor",color=Color3.fromRGB(112,208,255),primary=Color3.fromRGB(44,79,132),accent=Color3.fromRGB(121,226,255),material=Enum.Material.Glass},
+    Dragon={label="Dragonborn",desc="Dragon helmet, scales and tail",color=Color3.fromRGB(104,224,173),primary=Color3.fromRGB(37,100,88),accent=Color3.fromRGB(142,242,176),material=Enum.Material.SmoothPlastic},
+    Drone={label="Neon Android",desc="Cybernetic body and visor",color=Color3.fromRGB(89,213,250),primary=Color3.fromRGB(29,43,66),accent=Color3.fromRGB(70,240,255),material=Enum.Material.Metal},
+    Planet={label="Star Guardian",desc="Cosmic costume with orbit rings",color=Color3.fromRGB(186,152,255),primary=Color3.fromRGB(56,39,102),accent=Color3.fromRGB(225,195,255),material=Enum.Material.SmoothPlastic},
+    Fox={label="Spirit Kitsune",desc="Fox ears, mask and spectral tail",color=Color3.fromRGB(255,172,112),primary=Color3.fromRGB(205,115,81),accent=Color3.fromRGB(255,235,200),material=Enum.Material.SmoothPlastic},
+    UFO={label="Lunar Pilot",desc="Space suit and glass helmet",color=Color3.fromRGB(125,224,195),primary=Color3.fromRGB(66,89,106),accent=Color3.fromRGB(151,250,233),material=Enum.Material.Metal},
+    Mech={label="Titan Mech",desc="Large plated robotic exosuit",color=Color3.fromRGB(231,188,95),primary=Color3.fromRGB(69,79,102),accent=Color3.fromRGB(255,209,107),material=Enum.Material.Metal},
+    Butterfly={label="Fae Guardian",desc="Elegant armor and 3D butterfly fins",color=Color3.fromRGB(236,145,245),primary=Color3.fromRGB(107,70,145),accent=Color3.fromRGB(245,182,255),material=Enum.Material.SmoothPlastic},
+    Sakura={label="Sakura Academy",desc="Anime student outfit, pink hair and bow",color=Color3.fromRGB(255,182,210),primary=Color3.fromRGB(103,91,145),accent=Color3.fromRGB(244,169,202),material=Enum.Material.SmoothPlastic,anime=true,hair=Color3.fromRGB(240,137,185),skinTone=Color3.fromRGB(245,210,183)},
+    AnimeKitsune={label="Kitsune Girl",desc="Fluffy fox ears, blue hair and anime eyes",color=Color3.fromRGB(153,220,255),primary=Color3.fromRGB(78,98,157),accent=Color3.fromRGB(232,245,255),material=Enum.Material.SmoothPlastic,anime=true,hair=Color3.fromRGB(139,190,232),skinTone=Color3.fromRGB(246,217,192)},
+    AnimeCyber={label="Neon Anime",desc="Violet cyber hair, headphones and jacket",color=Color3.fromRGB(187,155,255),primary=Color3.fromRGB(63,67,110),accent=Color3.fromRGB(180,139,255),material=Enum.Material.SmoothPlastic,anime=true,hair=Color3.fromRGB(133,108,221),skinTone=Color3.fromRGB(235,205,181)},
+    Miko={label="Moon Miko",desc="White-and-red shrine outfit and long black hair",color=Color3.fromRGB(255,179,183),primary=Color3.fromRGB(236,230,229),accent=Color3.fromRGB(219,85,104),material=Enum.Material.SmoothPlastic,anime=true,hair=Color3.fromRGB(39,43,62),skinTone=Color3.fromRGB(245,210,189)},
+    AnimeIdol={label="Hologram Idol",desc="Mint twin-tails and stage outfit",color=Color3.fromRGB(124,243,216),primary=Color3.fromRGB(66,87,101),accent=Color3.fromRGB(103,247,215),material=Enum.Material.SmoothPlastic,anime=true,hair=Color3.fromRGB(99,219,204),skinTone=Color3.fromRGB(245,214,192)},
+    AnimeKnight={label="Anime Knight",desc="Silver hair, cute cape and light armor",color=Color3.fromRGB(211,224,249),primary=Color3.fromRGB(100,116,153),accent=Color3.fromRGB(219,225,246),material=Enum.Material.SmoothPlastic,anime=true,hair=Color3.fromRGB(214,217,232),skinTone=Color3.fromRGB(242,211,190)},
+}
+local MODEL_ORDER={"None","Sakura","AnimeKitsune","AnimeCyber","Miko","AnimeIdol","AnimeKnight","Prism","Dragon","Drone","Planet","Fox","UFO","Mech","Butterfly"}
+
+-- COSMETIC ENGINE. No privileged APIs or remote HTTP.
+-- Only changes how characters appear on THIS client; server avatar is untouched.
+local SKINS = {
+    Original={name="Original",primary=Color3.fromRGB(225,225,225),secondary=Color3.fromRGB(140,140,140),material=Enum.Material.SmoothPlastic},
+    Astral={name="Astral",primary=Color3.fromRGB(148,103,255),secondary=Color3.fromRGB(55,220,255),material=Enum.Material.Neon},
+    Cyber={name="Cyber",primary=Color3.fromRGB(25,29,42),secondary=Color3.fromRGB(0,222,238),material=Enum.Material.Metal},
+    Frost={name="Frost",primary=Color3.fromRGB(188,229,255),secondary=Color3.fromRGB(97,186,255),material=Enum.Material.Glass},
+    Ember={name="Ember",primary=Color3.fromRGB(65,26,33),secondary=Color3.fromRGB(255,102,54),material=Enum.Material.Metal},
+    Phantom={name="Phantom",primary=Color3.fromRGB(40,32,58),secondary=Color3.fromRGB(185,109,255),material=Enum.Material.SmoothPlastic},
+    Royale={name="Royale",primary=Color3.fromRGB(240,197,83),secondary=Color3.fromRGB(255,250,209),material=Enum.Material.Metal},
+    Mecha={name="Mecha",primary=Color3.fromRGB(75,84,106),secondary=Color3.fromRGB(112,252,183),material=Enum.Material.Metal},
+    Mint={name="Mint",primary=Color3.fromRGB(92,231,177),secondary=Color3.fromRGB(235,255,245),material=Enum.Material.SmoothPlastic},
+}
+local WINGS = {
+    None={name="None",color=Color3.fromRGB(255,255,255),glow=false},
+    Angel={name="Angel",color=Color3.fromRGB(232,242,255),glow=false},
+    Neon={name="Neon",color=Color3.fromRGB(75,213,255),glow=true},
+    Demon={name="Demon",color=Color3.fromRGB(255,84,106),glow=true},
+    Crystal={name="Crystal",color=Color3.fromRGB(122,222,255),glow=false},
+    Butterfly={name="Butterfly",color=Color3.fromRGB(232,137,255),glow=true},
+    Gold={name="Gold",color=Color3.fromRGB(255,216,100),glow=false},
+}
+local ownLooks = {} -- target UserId -> {skin, wings, model}; local-only, opt-in chat decoding
+local function isValidModelKey(key) return MODEL_SPECS[key]~=nil end
+local visuals = {}  -- target UserId -> generated render objects
+local cosmeticFolder = make("Folder",{Name="AURA_VISUALS_V3"},workspace)
+local remoteOrder = {}
+local cosmeticTime = 0
+local redrawLookButtons = function() end
+local shareCodeField
+
+local function recolorForPart(name,theme)
+    if name:find("Head") or name:find("Hand") or name:find("Foot") then
+        return theme.secondary
+    end
+    return theme.primary
+end
+local function freshVisualPart(parent, name, color, material, size, transparency)
+    return make("Part",{
+        Name=name,Size=size,Color=color,Material=material,
+        Anchored=true,CanCollide=false,CanTouch=false,CanQuery=false,
+        CastShadow=false,Massless=true,Transparency=transparency or 0,
+        TopSurface=Enum.SurfaceType.Smooth,BottomSurface=Enum.SurfaceType.Smooth,
+    },parent)
+end
+-- Each cosmetic part is welded to a limb (no per-frame world-space teleport).
+-- No server state, collisions or movement properties are changed.
+local function attachVisual(src, part, offset)
+    if not src or not part or not src:IsA("BasePart") then return nil end
+    local transform=offset or CFrame.new()
+    part.CFrame=src.CFrame*transform
+    local joint=Instance.new("Weld")
+    joint.Name="AuraCosmeticWeld"
+    joint.Part0=src
+    joint.Part1=part
+    joint.C0=transform
+    joint.C1=CFrame.new()
+    joint.Parent=part
+    part.Anchored=false
+    return joint
+end
+
+local function eraseVisual(uid)
+    local entry=visuals[uid]
+    if not entry then return end
+    visuals[uid]=nil
+    for source,old in pairs(entry.hidden) do
+        if source and source.Parent then
+            pcall(function() source.LocalTransparencyModifier=old end)
+        end
+    end
+    if entry.container then pcall(function()entry.container:Destroy()end) end
+end
+
+-- Attach one client-side geometric suit to each body segment.  No collisions, no physics.
+local function addWearableArmor(entry, character, key, preview)
+    local spec=MODEL_SPECS[key]
+    if not spec or key=="None" then return end
+    local multiplier=(not preview and entry.target==player) and state.modelScale or 1
+    local head=character:FindFirstChild("Head")
+    local torso=character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
+    local glow=Enum.Material.Neon
+    local animeMode=spec.anime==true
+    local function addBase(src, name, size, color, material, shape)
+        local part=freshVisualPart(entry.container,name,color,material,size*multiplier,preview and 0 or 1)
+        if shape then part.Shape=shape end
+        table.insert(entry.parts,{src=src,part=part,baseSize=size,wearable=true})
+        if preview then part.CFrame=src.CFrame else attachVisual(src,part,CFrame.new()) end
+        return part
+    end
+    local function addDetail(src, name, size, offset, color, mat, shape, alpha, motion)
+        if not src then return end
+        local part=freshVisualPart(entry.container,name,color or spec.accent,mat or glow,size*multiplier,preview and (alpha or 0) or 1)
+        if shape then part.Shape=shape end
+        local detail={src=src,part=part,offset=offset,baseOffset=offset,baseSize=size,wearable=true,alpha=alpha or 0,motion=motion}
+        table.insert(entry.details,detail)
+        if preview then part.CFrame=src.CFrame*offset else detail.joint=attachVisual(src,part,offset) end
+    end
+    for _,src in ipairs(character:GetChildren()) do
+        if src:IsA("BasePart") and src.Name~="HumanoidRootPart" then
+            local name=src.Name
+            local isHead=name=="Head"
+            local isBody=name=="Torso" or name=="UpperTorso" or name=="LowerTorso"
+            local isArm=name:find("Arm") or name:find("Hand")
+            local isLeg=name:find("Leg") or name:find("Foot")
+            local size=src.Size
+            local boost=(key=="Mech" and 1.22 or key=="Prism" and 1.1 or 1.06)
+            local dims=Vector3.new(size.X*boost,size.Y*(isHead and 1.08 or 1.04),size.Z*boost)
+            local baseColor=(isHead and animeMode) and spec.skinTone or (isHead and spec.accent or spec.primary)
+            addBase(src,"WEAR_"..name,dims,baseColor,spec.material,isHead and (animeMode or key=="Planet") and Enum.PartType.Ball or nil)
+            if animeMode then
+                if isArm then
+                    addDetail(src,"AnimeCuff",Vector3.new(size.X*1.12,.12,size.Z*1.12),
+                        CFrame.new(0,-size.Y*.34,0),spec.accent,Enum.Material.SmoothPlastic)
+                elseif isLeg then
+                    addDetail(src,"AnimeBoot",Vector3.new(size.X*1.09,.20,size.Z*1.13),
+                        CFrame.new(0,-size.Y*.39,0),spec.accent,Enum.Material.SmoothPlastic)
+                end
+            elseif isHead then
+                addDetail(src,"EyeVisor",Vector3.new(size.X*.78,.16,.10),CFrame.new(0,.02,-size.Z*.56),spec.accent,glow)
+                addDetail(src,"HelmetBrow",Vector3.new(size.X*.94,.11,size.Z*.12),CFrame.new(0,size.Y*.33,-size.Z*.4),spec.primary,Enum.Material.Metal)
+            elseif isBody then
+                addDetail(src,"ChestCore",Vector3.new(size.X*.56,.18,.14),CFrame.new(0,.10,-size.Z*.54),spec.accent,glow)
+                addDetail(src,"ChestPlate",Vector3.new(size.X*.90,size.Y*.40,.1),CFrame.new(0,-size.Y*.15,-size.Z*.57),spec.primary,spec.material)
+            elseif isArm then
+                addDetail(src,"Gauntlet",Vector3.new(size.X*.86,.12,size.Z*.86),CFrame.new(0,-size.Y*.23,0),spec.accent,glow)
+            elseif isLeg then
+                addDetail(src,"Boot",Vector3.new(size.X*1.09,.15,size.Z*1.1),CFrame.new(0,-size.Y*.33,0),spec.accent,spec.material)
+            end
+        end
+    end
+    if not head or not torso then return end
+    local s=head.Size
+    if animeMode then
+        -- Eyes face forward (-Z); hair moves with Head. Clothing moves with Torso.
+        addDetail(head,"HairCap",Vector3.new(s.X*1.13,.31,s.Z*1.12),
+            CFrame.new(0,s.Y*.48,.04),spec.hair,Enum.Material.SmoothPlastic,Enum.PartType.Ball)
+        addDetail(head,"BackHair",Vector3.new(s.X*.94,s.Y*1.36,s.Z*.36),
+            CFrame.new(0,-s.Y*.33,s.Z*.54),spec.hair,Enum.Material.SmoothPlastic)
+        for _,side in ipairs({-1,1}) do
+            addDetail(head,"AnimeEye"..side,Vector3.new(.17,.24,.055),
+                CFrame.new(side*s.X*.23,-s.Y*.06,-s.Z*.55),
+                Color3.fromRGB(38,50,80),Enum.Material.SmoothPlastic,Enum.PartType.Ball)
+            addDetail(head,"EyeShine"..side,Vector3.new(.064,.075,.045),
+                CFrame.new(side*s.X*.23-.034,-s.Y*.02,-s.Z*.603),
+                Color3.fromRGB(255,255,255),Enum.Material.SmoothPlastic,Enum.PartType.Ball)
+            addDetail(head,"SideLock"..side,Vector3.new(s.X*.18,s.Y*.92,s.Z*.26),
+                CFrame.new(side*s.X*.52,-s.Y*.28,-s.Z*.04),spec.hair,Enum.Material.SmoothPlastic)
+            addDetail(head,"FrontBang"..side,Vector3.new(s.X*.43,s.Y*.30,s.Z*.19),
+                CFrame.new(side*s.X*.23,s.Y*.27,-s.Z*.44)*CFrame.Angles(0,0,side*.11),
+                spec.hair,Enum.Material.SmoothPlastic)
+        end
+        addDetail(head,"AnimeSmile",Vector3.new(.20,.045,.05),
+            CFrame.new(0,-s.Y*.32,-s.Z*.55),Color3.fromRGB(142,82,93),Enum.Material.SmoothPlastic)
+        addDetail(torso,"Collar",Vector3.new(torso.Size.X*.66,.23,torso.Size.Z*.24),
+            CFrame.new(0,torso.Size.Y*.33,-torso.Size.Z*.55),spec.accent,Enum.Material.SmoothPlastic)
+        addDetail(torso,"Ribbon",Vector3.new(.35,.32,.15),
+            CFrame.new(0,torso.Size.Y*.20,-torso.Size.Z*.59),spec.accent,Enum.Material.SmoothPlastic)
+        for _,side in ipairs({-1,1}) do
+            addDetail(torso,"SkirtFront"..side,Vector3.new(torso.Size.X*.53,.58,.14),
+                CFrame.new(side*torso.Size.X*.26,-torso.Size.Y*.48,-torso.Size.Z*.50)*CFrame.Angles(0,0,side*.10),
+                spec.primary,Enum.Material.SmoothPlastic)
+            addDetail(torso,"SkirtBack"..side,Vector3.new(torso.Size.X*.50,.58,.14),
+                CFrame.new(side*torso.Size.X*.26,-torso.Size.Y*.48,torso.Size.Z*.51)*CFrame.Angles(0,0,-side*.10),
+                spec.primary,Enum.Material.SmoothPlastic)
+        end
+        if key=="Sakura" then
+            addDetail(head,"SakuraBow",Vector3.new(.53,.28,.17),
+                CFrame.new(s.X*.34,s.Y*.62,-s.Z*.08)*CFrame.Angles(0,0,.3),spec.accent,Enum.Material.SmoothPlastic)
+        elseif key=="AnimeKitsune" then
+            for _,side in ipairs({-1,1}) do
+                addDetail(head,"KitsuneEar"..side,Vector3.new(.31,.57,.22),
+                    CFrame.new(side*s.X*.32,s.Y*.79,0)*CFrame.Angles(0,0,-side*.21),
+                    spec.hair,Enum.Material.SmoothPlastic)
+            end
+            addDetail(torso,"KitsuneTail",Vector3.new(.42,.62,1.08),
+                CFrame.new(0,-torso.Size.Y*.30,torso.Size.Z*.84)*CFrame.Angles(-.22,0,0),
+                spec.accent,Enum.Material.SmoothPlastic,nil,0,true)
+        elseif key=="AnimeCyber" then
+            for _,side in ipairs({-1,1}) do
+                addDetail(head,"Headphone"..side,Vector3.new(.19,.46,.42),
+                    CFrame.new(side*s.X*.56,0,-s.Z*.04),spec.accent,Enum.Material.Metal)
+            end
+            addDetail(torso,"CyberLine",Vector3.new(torso.Size.X*.6,.11,.13),
+                CFrame.new(0,.05,-torso.Size.Z*.58),spec.accent,Enum.Material.Neon)
+        elseif key=="Miko" then
+            for _,side in ipairs({-1,1}) do
+                addDetail(head,"MikoRibbon"..side,Vector3.new(.24,.36,.16),
+                    CFrame.new(side*s.X*.47,s.Y*.23,s.Z*.42),spec.accent,Enum.Material.SmoothPlastic)
+            end
+        elseif key=="AnimeIdol" then
+            for _,side in ipairs({-1,1}) do
+                addDetail(head,"TwinTail"..side,Vector3.new(.29,s.Y*1.12,.32),
+                    CFrame.new(side*s.X*.68,-s.Y*.41,s.Z*.29),spec.hair,Enum.Material.SmoothPlastic)
+            end
+            addDetail(torso,"IdolBadge",Vector3.new(.30,.30,.12),
+                CFrame.new(.43,.05,-torso.Size.Z*.57),spec.accent,Enum.Material.Neon,Enum.PartType.Ball)
+        elseif key=="AnimeKnight" then
+            addDetail(head,"SilverTiara",Vector3.new(.64,.20,.18),
+                CFrame.new(0,s.Y*.52,-s.Z*.37),spec.accent,Enum.Material.Metal)
+            addDetail(torso,"KnightCape",Vector3.new(torso.Size.X*1.08,torso.Size.Y*.99,.18),
+                CFrame.new(0,-.15,torso.Size.Z*.70),spec.accent,Enum.Material.SmoothPlastic)
+        end
+    elseif key=="Dragon" then
+        for _,side in ipairs({-1,1}) do
+            addDetail(head,"DragonHorn"..side,Vector3.new(.21,.56,.27),CFrame.new(side*s.X*.34,s.Y*.65,.08)*CFrame.Angles(0,0,side*.3),spec.accent,spec.material)
+        end
+        for i=1,3 do addDetail(torso,"DragonSpine"..i,Vector3.new(.3,.35,.28),CFrame.new(0,.45-(i-1)*.37,torso.Size.Z*.65),spec.accent,spec.material) end
+        addDetail(torso,"DragonTail",Vector3.new(.33,.43,1.2),CFrame.new(0,-torso.Size.Y*.5,1.03)*CFrame.Angles(-.30,0,0),spec.primary,spec.material,nil,0,true)
+    elseif key=="Fox" then
+        for _,side in ipairs({-1,1}) do
+            addDetail(head,"FoxEar"..side,Vector3.new(.35,.58,.25),CFrame.new(side*s.X*.33,s.Y*.64,0)*CFrame.Angles(0,0,-side*.15),spec.primary,spec.material)
+        end
+        addDetail(head,"FoxMuzzle",Vector3.new(.68,.27,.35),CFrame.new(0,-s.Y*.17,-s.Z*.59),spec.accent,spec.material)
+        addDetail(torso,"FoxTail",Vector3.new(.5,.65,1.3),CFrame.new(0,-torso.Size.Y*.22,1.05)*CFrame.Angles(-.35,0,0),spec.accent,spec.material,nil,0,true)
+    elseif key=="Mech" then
+        for _,side in ipairs({-1,1}) do
+            addDetail(torso,"MechShoulder"..side,Vector3.new(.75,.47,.9),CFrame.new(side*(torso.Size.X*.55+.20),torso.Size.Y*.42,0),spec.primary,Enum.Material.Metal)
+            addDetail(torso,"MechLamp"..side,Vector3.new(.22,.18,.18),CFrame.new(side*(torso.Size.X*.56+.20),torso.Size.Y*.42,-.47),spec.accent,glow)
+        end
+    elseif key=="Prism" then
+        for _,side in ipairs({-1,1}) do
+            addDetail(torso,"PrismSpike"..side,Vector3.new(.33,.9,.42),CFrame.new(side*(torso.Size.X*.55+.20),torso.Size.Y*.48,0)*CFrame.Angles(0,0,side*.4),spec.accent,Enum.Material.Glass)
+        end
+        addDetail(head,"PrismCrown",Vector3.new(.64,.38,.67),CFrame.new(0,s.Y*.67,0)*CFrame.Angles(0,.3,0),spec.accent,Enum.Material.Glass,nil,.12,true)
+    elseif key=="Drone" then
+        addDetail(head,"AndroidAntenna",Vector3.new(.09,.65,.09),CFrame.new(s.X*.3,s.Y*.7,0),spec.accent,Enum.Material.Metal)
+        addDetail(head,"AndroidBeacon",Vector3.new(.23,.23,.23),CFrame.new(s.X*.3,s.Y*1.03,0),spec.accent,glow,Enum.PartType.Ball,0,true)
+    elseif key=="Planet" then
+        for i=0,7 do
+            local a=i*math.pi/4
+            addDetail(torso,"OrbitRing"..i,Vector3.new(.27,.12,.27),CFrame.new(math.cos(a)*1.22,math.sin(a)*.22,math.sin(a)*1.12),spec.accent,Enum.Material.Glass,Enum.PartType.Ball,.08,true)
+        end
+        addDetail(head,"StarCrown",Vector3.new(.42,.37,.42),CFrame.new(0,s.Y*.70,0),spec.accent,glow,Enum.PartType.Ball,0,true)
+    elseif key=="UFO" then
+        addDetail(head,"GlassHelmet",s*1.30,CFrame.new(),Color3.fromRGB(150,230,237),Enum.Material.Glass,Enum.PartType.Ball,.3)
+        addDetail(torso,"PilotHarness",Vector3.new(torso.Size.X*.87,.28,.18),CFrame.new(0,.3,-torso.Size.Z*.64),spec.accent,glow)
+    elseif key=="Butterfly" then
+        for _,side in ipairs({-1,1}) do
+            addDetail(torso,"FaeWingTop"..side,Vector3.new(.2,1.6,1.0),CFrame.new(side*1.0,.36,torso.Size.Z*.58)*CFrame.Angles(0,side*.55,side*.38),spec.accent,Enum.Material.Glass,Enum.PartType.Ball,.15,true)
+            addDetail(torso,"FaeWingLower"..side,Vector3.new(.2,.9,.65),CFrame.new(side*.72,-.53,torso.Size.Z*.65)*CFrame.Angles(0,side*.35,-side*.2),spec.primary,Enum.Material.Glass,Enum.PartType.Ball,.12,true)
+        end
+    end
+end
+
+local function buildVisual(target, skinKey, wingsKey, modelKey)
+    if not running then return end
+    local uid=target.UserId
+    eraseVisual(uid)
+    modelKey=(MODEL_SPECS[modelKey] and modelKey) or "None"
+    if skinKey=="Original" and wingsKey=="None" and modelKey=="None" then return end
+    local character=target.Character
+    if not character or not character.Parent then return end
+    local theme=SKINS[skinKey] or SKINS.Original
+    local wingTheme=WINGS[wingsKey] or WINGS.None
+    local bodySource=character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
+    if not bodySource then return end
+    local container=make("Model",{Name="AURA_LOOK_"..tostring(uid)},cosmeticFolder)
+    local entry={container=container,hidden={},parts={},details={},wingParts={},char=character,target=target,wing=wingsKey,skin=skinKey,model=modelKey}
+    visuals[uid]=entry
+
+    if skinKey~="Original" or modelKey~="None" then
+        -- Hide the original avatar only on this particular client.
+        for _,obj in ipairs(character:GetDescendants()) do
+            if obj:IsA("BasePart") and obj.Name~="HumanoidRootPart" then
+                entry.hidden[obj]=obj.LocalTransparencyModifier
+                pcall(function() obj.LocalTransparencyModifier=1 end)
+            end
+        end
+        if modelKey~="None" then
+            addWearableArmor(entry,character,modelKey,false)
+        else
+        -- Procedural body replacement. Works with most R6/R15 avatars.
+        for _,source in ipairs(character:GetDescendants()) do
+            if source:IsA("BasePart") and source.Name~="HumanoidRootPart" and source.Parent==character then
+                local isHead=source.Name=="Head"
+                local limb=freshVisualPart(container,"Skin_"..source.Name,recolorForPart(source.Name,theme),theme.material,
+                    Vector3.new(source.Size.X*1.02,source.Size.Y*1.02,source.Size.Z*1.02),1)
+                if isHead and skinKey=="Astral" then limb.Shape=Enum.PartType.Ball end
+                entry.parts[#entry.parts+1]={src=source,part=limb}
+                attachVisual(source,limb,CFrame.new())
+                if isHead then
+                    local visor=freshVisualPart(container,"Visor",theme.secondary,Enum.Material.Neon,
+                        Vector3.new(math.max(.5,source.Size.X*.74),math.max(.1,source.Size.Y*.13),.105),1)
+                    local off=CFrame.new(0,.02,-source.Size.Z*.53)
+                    entry.details[#entry.details+1]={src=source,part=visor,offset=off}
+                    attachVisual(source,visor,off)
+                elseif source.Name=="Torso" or source.Name=="UpperTorso" then
+                    local plate=freshVisualPart(container,"CorePlate",theme.secondary,Enum.Material.Neon,
+                        Vector3.new(source.Size.X*.55,source.Size.Y*.13,.1),1)
+                    local off=CFrame.new(0,.17,-source.Size.Z*.53)
+                    entry.details[#entry.details+1]={src=source,part=plate,offset=off}
+                    attachVisual(source,plate,off)
+                end
+            end
+        end
+        end -- model versus skin body shell
+    end
+    if wingsKey~="None" then
+        -- Animated floating feathers/panels: no physical collision, no server state.
+        for side=-1,1,2 do
+            for j=1,6 do
+                local material=wingTheme.glow and Enum.Material.Neon or Enum.Material.SmoothPlastic
+                if wingsKey=="Crystal" then material=Enum.Material.Glass end
+                local feather=freshVisualPart(container,"Wing_"..side.."_"..j,wingTheme.color,material,
+                    Vector3.new(.22,.82+j*.09,.27+j*.07),1)
+                if wingsKey=="Butterfly" then
+                    feather.Size=Vector3.new(.13,.5+j*.16,.65)
+                end
+                local spread=state.wingSpread
+                local x=side*(.73+j*.23*spread)
+                local y=.52+math.sin(j*.55)*.27-j*.09
+                local z=.57+j*.05
+                local offset=CFrame.new(x,y,z)*CFrame.Angles(0,side*.36,side*(.35+j*.11))
+                local joint=attachVisual(bodySource,feather,offset)
+                entry.wingParts[#entry.wingParts+1]={part=feather,torso=bodySource,side=side,index=j,joint=joint}
+            end
+        end
+    end
+    -- Start at the exact limb positions before any fading begins.
+    for _,pair in ipairs(entry.parts) do
+        if pair.src and pair.src.Parent then pair.part.CFrame=pair.src.CFrame end
+    end
+    for _,pair in ipairs(entry.details) do
+        if pair.src and pair.src.Parent then pair.part.CFrame=pair.src.CFrame*pair.offset end
+    end
+    -- Softly fade the new parts in (short tweens to avoid start-up load).
+    for _,partData in ipairs(entry.parts) do
+        setTween(partData.part,state.reduceMotion and 0 or .3,{Transparency=0})
+    end
+    for _,detail in ipairs(entry.details) do
+        setTween(detail.part,state.reduceMotion and 0 or .3,{Transparency=detail.alpha or 0})
+    end
+    for _,wingData in ipairs(entry.wingParts) do
+        setTween(wingData.part,state.reduceMotion and 0 or .4,{Transparency=0})
+    end
+end
+local function updateLocalLook()
+    ownLooks[player.UserId]={skin=state.skin,wings=state.wings,model=state.model}
+    buildVisual(player,state.skin,state.wings,state.model)
+    redrawLookButtons()
+    if shareCodeField then shareCodeField.Text="AURA LOOK "..state.skin.." "..state.wings.." "..state.model end
+end
+local function assignRemoteLook(target,skinKey,wingsKey,modelKey)
+    if target==player then return end
+    if not SKINS[skinKey] or not WINGS[wingsKey] or not isValidModelKey(modelKey or "None") then return end
+    ownLooks[target.UserId]={skin=skinKey,wings=wingsKey,model=modelKey or "None"}
+    -- Limit remote cosmetics for lower-end laptops.
+    local already=false
+    for _,uid in ipairs(remoteOrder) do if uid==target.UserId then already=true break end end
+    if not already then table.insert(remoteOrder,target.UserId) end
+    while #remoteOrder>5 do
+        local old=table.remove(remoteOrder,1)
+        if old~=player.UserId then ownLooks[old]=nil;eraseVisual(old) end
+    end
+    buildVisual(target,skinKey,wingsKey,modelKey or "None")
+end
+
+-- Opt-in visible-chat sharing. It does NOT bypass chat restrictions or silently transmit data.
+-- To share a look, copy the code and send it through normal chat manually.
+local function onSharedChat(message)
+    if not running or not state.acceptSharedLooks then return end
+    local textValue=message and message.Text
+    local origin=message and message.TextSource
+    if type(textValue)~="string" or not origin then return end
+    if origin.UserId==player.UserId then return end
+    local skin,wing,modelKey=textValue:match("^AURA LOOK ([%a]+) ([%a]+) ([%a]+)$")
+    if not skin then
+        skin,wing=textValue:match("^AURA LOOK ([%a]+) ([%a]+)$")
+        modelKey="None"
+    end
+    if not skin or not wing or not SKINS[skin] or not WINGS[wing] then return end
+    local target=Players:GetPlayerByUserId(origin.UserId)
+    if target then assignRemoteLook(target,skin,wing,modelKey) end
+end
+pcall(function()connect(TextChatService.MessageReceived,onSharedChat)end)
+connect(Players.PlayerRemoving,function(target)
+    eraseVisual(target.UserId)
+    ownLooks[target.UserId]=nil
+end)
+local function listenCharacter(target)
+    connect(target.CharacterAdded,function()
+        task.delay(.9,function()
+            if running then
+                local preset=ownLooks[target.UserId]
+                if preset then
+                    buildVisual(target,preset.skin,preset.wings,preset.model or "None")
+                end
+            end
+        end)
+    end)
+end
+for _,target in ipairs(Players:GetPlayers()) do listenCharacter(target) end
+connect(Players.PlayerAdded,listenCharacter)
+
+-- No per-frame part.CFrame assignments: welded parts follow R6/R15 automatically.
+-- Only a handful of joints are rotated, at 20 Hz, for gentle cosmetic motion.
+local cosmeticAccumulator=0
+connect(RunService.Heartbeat,function(dt)
+    if not running or not next(visuals) then return end
+    cosmeticTime=cosmeticTime+dt
+    cosmeticAccumulator=cosmeticAccumulator+dt
+    if cosmeticAccumulator<1/20 then return end
+    cosmeticAccumulator=0
+    for uid,entry in pairs(visuals) do
+        if not entry.char or not entry.char.Parent then
+            eraseVisual(uid)
+        else
+            local flap=math.sin(cosmeticTime*2.4*state.wingSpeed)*.13
+            for _,wing in ipairs(entry.wingParts) do
+                if wing.joint and wing.joint.Parent then
+                    local side,j=wing.side,wing.index
+                    local spread=state.wingSpread
+                    local x=side*(.73+j*.23*spread)
+                    local y=.52+math.sin(j*.55)*.27-j*.09
+                    local z=.57+j*.05
+                    wing.joint.C0=CFrame.new(x,y,z)
+                        *CFrame.Angles(0,side*(.36+flap),side*(.35+j*.11+flap))
+                end
+            end
+            if state.modelAnimate then
+                for _,detail in ipairs(entry.details) do
+                    if detail.motion and detail.joint and detail.joint.Parent then
+                        detail.joint.C0=detail.baseOffset
+                            *CFrame.Angles(0,math.sin(cosmeticTime*1.8)*.08,math.sin(cosmeticTime*1.5)*.07)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- V6: the live 3D model is generated by addWearableArmor inside buildVisual.
+-- No separate flying model instances exist. All suit parts follow character limbs.
+refreshModelSize=function()
+    local entry=visuals[player.UserId]
+    if not entry or entry.model=="None" then return end
+    for _,item in ipairs(entry.parts) do
+        if item.wearable and item.part and item.part.Parent then
+            item.part.Size=item.baseSize*state.modelScale
+        end
+    end
+    for _,item in ipairs(entry.details) do
+        if item.wearable and item.part and item.part.Parent then
+            item.part.Size=item.baseSize*state.modelScale
+        end
+    end
+end
+
+-- 3D mannequin preview uses the same armor generator as the real character.
+local function createPreviewAvatar(key, parent)
+    if key=="None" or not MODEL_SPECS[key] then return nil end
+    local rig=make("Model",{Name="AURA_WEARABLE_PREVIEW_"..key},parent)
+    local specs={
+        {"Head",Vector3.new(1.35,1.25,1.1),Vector3.new(0,2.7,0)},
+        {"Torso",Vector3.new(1.8,2.0,.9),Vector3.new(0,1.1,0)},
+        {"Left Arm",Vector3.new(.68,1.9,.8),Vector3.new(-1.35,1.1,0)},
+        {"Right Arm",Vector3.new(.68,1.9,.8),Vector3.new(1.35,1.1,0)},
+        {"Left Leg",Vector3.new(.75,1.95,.8),Vector3.new(-.5,-.85,0)},
+        {"Right Leg",Vector3.new(.75,1.95,.8),Vector3.new(.5,-.85,0)},
+    }
+    for _,item in ipairs(specs) do
+        make("Part",{Name=item[1],Size=item[2],CFrame=CFrame.new(item[3]),Anchored=true,
+            CanCollide=false,Transparency=1},rig)
+    end
+    local overlay=make("Model",{Name="3D_Suit"},rig)
+    local entry={container=overlay,parts={},details={},target=nil}
+    addWearableArmor(entry,rig,key,true)
+    return rig
+end
+
+local function chooseCard(pageName,titleText,description,themeColor,selected,fn)
+    local card=makeCard(pageName,66)
+    local orb=make("Frame",{Position=UDim2.fromOffset(14,14),Size=UDim2.fromOffset(35,35),BackgroundColor3=themeColor,BorderSizePixel=0},card)
+    corner(orb,13)
+    border(orb,Color3.new(1,1,1),.72,1)
+    text(card,titleText,13,true,shades.white,{Position=UDim2.fromOffset(62,8),Size=UDim2.fromOffset(225,23)})
+    text(card,description,10,false,shades.muted,{Position=UDim2.fromOffset(63,31),Size=UDim2.fromOffset(330,19)})
+    local check=trackAccent(text(card,"○",21,true,accent(),{Position=UDim2.new(1,-37,0,15),Size=UDim2.fromOffset(27,30)}),"TextColor3")
+    local hit=make("TextButton",{Size=UDim2.fromScale(1,1),Text="",BackgroundTransparency=1,AutoButtonColor=false},card)
+    connect(hit.MouseButton1Click,fn)
+    connect(hit.MouseEnter,function() setTween(card,.15,{BackgroundTransparency=.07}) end)
+    connect(hit.MouseLeave,function() setTween(card,.15,{BackgroundTransparency=.25}) end)
+    return function() check.Text=selected() and "●" or "○" end
+end
+local skinButtonRefresh={}
+local wingButtonRefresh={}
+local modelButtonRefresh={}
+local refreshModelPreview=function() end
+redrawLookButtons=function()
+    for _,fn in pairs(skinButtonRefresh) do fn() end
+    for _,fn in pairs(wingButtonRefresh) do fn() end
+    for _,fn in pairs(modelButtonRefresh) do fn() end
+    refreshModelPreview()
+end
+pageBuilders.Skins = function()
+    section("Skins","Virtual avatar skins","Local model replacement. Others without AURA see your real avatar.")
+    for _,item in ipairs({
+        {"Original","Your original Roblox avatar"},
+        {"Astral","Violet cosmic armor with a bright visor"},
+        {"Cyber","Black metallic shell with cyan details"},
+        {"Frost","Ice glass and light-blue panels"},
+        {"Ember","Dark red armor with glowing details"},
+        {"Phantom","Dark purple ethereal look"},
+        {"Royale","Gold plating and pale highlights"},
+        {"Mecha","Steel robotic armor with mint glow"},
+        {"Mint","Fresh green futuristic suit"},
+    }) do
+        local key=item[1]
+        skinButtonRefresh[key]=chooseCard("Skins",key,item[2],SKINS[key].secondary,
+            function()return state.skin==key end,function()
+                state.skin=key;updateLocalLook();toast(key.." skin equipped (local)")
+            end)
+    end
+    note("Skins","Local-only model","Client visual shells cannot replace the avatar on the game server. The custom look is not seen by normal players.")
+end
+pageBuilders.Wings = function()
+    section("Wings","Animated wing wardrobe","Decorations follow your avatar and gently flap while moving.")
+    for _,item in ipairs({
+        {"None","Remove all virtual wings"},
+        {"Angel","Soft white feather-like wings"},
+        {"Neon","Electric cyan illuminated wings"},
+        {"Demon","Red glowing segmented wings"},
+        {"Crystal","Translucent frozen wings"},
+        {"Butterfly","Wide violet neon butterfly wings"},
+        {"Gold","Golden metallic wings"},
+    }) do
+        local key=item[1]
+        wingButtonRefresh[key]=chooseCard("Wings",key,item[2],WINGS[key].color,
+            function()return state.wings==key end,function()
+                state.wings=key;updateLocalLook();toast(key.." wings equipped (local)")
+            end)
+    end
+    addSlider("Wings","wingSpeed","Wing animation speed","How quickly wing decorations flap",.25,2,function(v)return string.format("%.1fx",v)end)
+    addSlider("Wings","wingSpread","Wing spread","Width of the wing decoration",.5,1.5,function(v)return string.format("%.1fx",v)end)
+    note("Wings","No flight ability","Wings are visual decorations only and do not change character physics, speed or jumping.")
+end
+pageBuilders.Models = function()
+    section("Models","Anime + 3D wearable avatars","Procedural anime hair, clothes and accessories as local avatar overlays, not floating companions.")
+    local previewCard=makeCard("Models",225)
+    text(previewCard,"3D AVATAR PREVIEW  ·  ANIME + CLASSIC",10,true,shades.muted,{Position=UDim2.fromOffset(16,10),Size=UDim2.new(1,-26,0,20)})
+    local viewport=make("ViewportFrame",{
+        Position=UDim2.fromOffset(14,35),Size=UDim2.new(1,-28,0,176),
+        BackgroundColor3=Color3.fromRGB(12,20,38),BackgroundTransparency=.08,
+        BorderSizePixel=0,Ambient=Color3.fromRGB(150,168,206),
+        LightColor=Color3.fromRGB(235,247,255),LightDirection=Vector3.new(-1,-1,-1)
+    },previewCard)
+    corner(viewport,12)
+    local worldModel=make("WorldModel",{},viewport)
+    local camera=make("Camera",{CFrame=CFrame.lookAt(Vector3.new(6,3.4,-8.9),Vector3.new(0,1,0))},viewport)
+    viewport.CurrentCamera=camera
+    local previewAsset
+    local emptyLabel=text(viewport,"SELECT A WEARABLE 3D MODEL",13,true,shades.muted,{
+        Size=UDim2.fromScale(1,1),TextXAlignment=Enum.TextXAlignment.Center,
+    })
+    refreshModelPreview=function()
+        if previewAsset then previewAsset:Destroy();previewAsset=nil end
+        previewAsset=createPreviewAvatar(state.model,worldModel)
+        emptyLabel.Visible=previewAsset==nil
+    end
+    refreshModelPreview()
+    for _,key in ipairs(MODEL_ORDER) do
+        local spec=MODEL_SPECS[key]
+        modelButtonRefresh[key]=chooseCard("Models",spec.label,spec.desc,spec.color,
+            function()return state.model==key end,
+            function()
+                state.model=key
+                updateLocalLook()
+                toast(key=="None" and "3D body restored" or (spec.label.." equipped on avatar"))
+            end)
+    end
+    addSlider("Models","modelScale","Model proportions","Scale the wearable shell on your avatar",.85,1.25,function(v)return string.format("%.2fx",v)end)
+    addToggle("Models","modelAnimate","Animate suit details","Subtle animation for tails, crystals, rings and glowing accessories")
+    action("Models","Return to normal avatar","Remove wearable armor and restore your previous skin.","RESTORE",function()
+        state.model="None"
+        updateLocalLook()
+        toast("Wearable model removed")
+    end)
+    note("Models","Client-only replacement","The model follows the head, torso, arms and legs in R6/R15. It is visible on this client only; other players see the original Roblox character unless they explicitly render a shared AURA look.")
+    note("Models","Anime designs","Six anime-inspired looks use procedural parts rather than imported meshes. Shape quality depends on R6/R15 proportions. The look is cosmetic and local only.")
+    note("Models","Skin compatibility","Wearable models take precedence over color-only Skins. Your selected Skin returns when you remove the model.")
+end
+
+pageBuilders.Sharing = function()
+    section("Sharing","Look codes","Share skins, wings and 3D models through normal Roblox chat (opt-in).")
+    addToggle("Sharing","acceptSharedLooks","Read look codes from chat","Only AURA V6 clients that receive chat messages can render shared looks")
+    local card=makeCard("Sharing",115)
+    text(card,"Your look code",13,true,shades.white,{Position=UDim2.fromOffset(14,9),Size=UDim2.fromOffset(350,24)})
+    text(card,"Copy this code into NORMAL CHAT, manually.",10,false,shades.muted,{Position=UDim2.fromOffset(14,33),Size=UDim2.fromOffset(420,18)})
+    shareCodeField=make("TextBox",{
+        Position=UDim2.fromOffset(14,59),Size=UDim2.new(1,-28,0,37),
+        Text="AURA LOOK "..state.skin.." "..state.wings.." "..state.model,ClearTextOnFocus=false,
+        TextColor3=shades.white,TextSize=13,Font=Enum.Font.Code,
+        BackgroundColor3=shades.sidebar,BackgroundTransparency=.08,
+        TextXAlignment=Enum.TextXAlignment.Center,
+    },card)
+    corner(shareCodeField,9)
+    action("Sharing","Copy look code","Copy into clipboard (if supported) or select the text above.","COPY CODE",function()
+        local code="AURA LOOK "..state.skin.." "..state.wings.." "..state.model
+        local copied=false
+        if type(setclipboard)=="function" then copied=pcall(setclipboard,code) end
+        shareCodeField.Text=code
+        shareCodeField:CaptureFocus()
+        toast(copied and "Code copied. Paste it into chat." or "Select and copy the code field")
+    end)
+    note("Sharing","How sharing works","Other players see your real avatar. AURA users who receive your chat code can locally show your selected look. Chat filtering/permissions may block it.")
+    action("Sharing","Clear received looks","Remove all remotely displayed AURA skins from your client.","CLEAR",function()
+        for uid,_ in pairs(ownLooks) do
+            if uid~=player.UserId then ownLooks[uid]=nil;eraseVisual(uid) end
+        end
+        remoteOrder={}
+        toast("Shared looks cleared")
+    end)
+end
+
+-- Input / viewport / drag handling
+local dragging=false
+local dragInput=nil
+local startMouse=nil
+local startPanel=nil
+local dragBar=make("Frame",{
+    Position=UDim2.fromOffset(210,0),Size=UDim2.new(1,-270,0,24),
+    BackgroundTransparency=1,Active=true,
+},panel)
+connect(dragBar.InputBegan,function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+        dragging=true
+        startMouse=input.Position
+        startPanel=panel.Position
+        dragInput=input.UserInputType==Enum.UserInputType.Touch and input or nil
+    end
+end)
+connect(UserInputService.InputChanged,function(input)
+    if not dragging then return end
+    if (dragInput and input==dragInput) or (not dragInput and input.UserInputType==Enum.UserInputType.MouseMovement) then
+        local d=input.Position-startMouse
+        panel.Position=UDim2.new(startPanel.X.Scale,startPanel.X.Offset+d.X,startPanel.Y.Scale,startPanel.Y.Offset+d.Y)
+    end
+end)
+connect(UserInputService.InputEnded,function(input)
+    if dragging and ((dragInput and input==dragInput) or (not dragInput and input.UserInputType==Enum.UserInputType.MouseButton1)) then
+        dragging=false;dragInput=nil
+    end
+end)
+connect(mini.MouseEnter,function()setTween(miniScale,.18,{Scale=1.07})end)
+connect(mini.MouseLeave,function()setTween(miniScale,.18,{Scale=1})end)
+connect(dockLogo.MouseButton1Click,function()setOpened(not state.opened)end)
+connect(close.MouseButton1Click,function()setOpened(false)end)
+connect(overlay.MouseButton1Click,function()setOpened(false)end)
+connect(UserInputService.InputBegan,function(input,processed)
+    if not running or processed then return end
+    if input.KeyCode==Enum.KeyCode.Insert then
+        if not state.opened and state.hideFloatingButton then
+            -- Insert is always a way back even in Photo Mode.
+            mini.Visible=false
+        end
+        setOpened(not state.opened)
+    end
+end)
+local camViewportConnection
+local function watchCamera()
+    if camViewportConnection then camViewportConnection:Disconnect() end
+    local camera=workspace.CurrentCamera
+    if camera then
+        camViewportConnection=connect(camera:GetPropertyChangedSignal("ViewportSize"),recalcScale)
+        recalcScale()
+    end
+end
+watchCamera()
+connect(workspace:GetPropertyChangedSignal("CurrentCamera"),function()
+    watchCamera()
+    if state.customFOV then applyFOV() end
+end)
+
+local frames,windowStart=0,os.clock()
+connect(RunService.RenderStepped,function()
+    if not running then return end
+    frames=frames+1
+    local now=os.clock()
+    local dt=now-windowStart
+    if dt<.7 then return end
+    local fps=math.floor(frames/dt+.5)
+    frames=0;windowStart=now
+    local value="FPS  "..fps
+    fpsFooter.Text=value
+    fpsHUDValue.Text=value
+    dockFPS.Text="FPS "..fps
+    local pingText="PING --"
+    local okPing, pingResult=pcall(function()
+        return Stats.Network.ServerStatsItem["Data Ping"]:GetValueString()
+    end)
+    if okPing and pingResult then
+        pingText="PING "..tostring(pingResult):gsub("%s+", "")
+    else
+        local okNative, nativePing=pcall(function()return player:GetNetworkPing()end)
+        if okNative and type(nativePing)=="number" then
+            pingText="PING "..tostring(math.floor(nativePing*1000+.5)).."ms"
+        end
+    end
+    dockPing.Text=pingText
+    if diagFPS then diagFPS.Text="FPS: "..fps end
+    local cam=workspace.CurrentCamera
+    if cam then
+        local sz=cam.ViewportSize
+        if diagViewport then diagViewport.Text="Display: "..math.floor(sz.X).." × "..math.floor(sz.Y) end
+    end
+    local active=0
+    for _,which in ipairs({"bloom","rays","grade","dof","haze"}) do
+        if state[which] then active=active+1 end
+    end
+    if diagEffects then diagEffects.Text="Active effects: "..active end
+    if diagStatus then diagStatus.Text="Status: "..(state.preset=="Original" and "Original" or state.preset) end
+end)
+
+unloadScript=function()
+    if not running then return end
+    running=false
+    for _,connection in ipairs(connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    for _,item in pairs(runningTweens) do
+        pcall(function() item:Cancel() end)
+    end
+    for uid,_ in pairs(visuals) do eraseVisual(uid) end
+    pcall(function() cosmeticFolder:Destroy() end)
+    restoreLighting()
+    local camera=workspace.CurrentCamera
+    if camera then safeSet(camera,"FieldOfView",firstCameraFOV) end
+    for _,effect in pairs(spawnedEffects) do
+        pcall(function() effect:Destroy() end)
+    end
+    pcall(function() gui:Destroy() end)
+    if env.AURA_VISION_V6_CLEANUP==unloadScript then env.AURA_VISION_V6_CLEANUP=nil end
+end
+
+env.AURA_VISION_V6_CLEANUP=unloadScript
+switchPage("Overview")
+recalcScale()
+refreshUI()
+updateStatus()
+-- Important: do not change Lighting, FOV, skins or post-processing on startup.
+print("[AURA VISION V6] Loaded in safe mode. Press INSERT or click A in bottom glass dock.")
