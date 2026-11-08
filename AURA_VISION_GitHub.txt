@@ -1,0 +1,747 @@
+--[[
+    AURA VISION 1.0 - Liquid Glass Visual Menu
+    CLIENT-SIDE ONLY | Roblox Luau
+    Toggle menu: INSERT or the floating A button.
+    No remote requests, no loadstring, no external libraries.
+
+    This file is client-side code. Regular Roblox does not have a built-in
+    button to load arbitrary .lua files. Availability depends on the
+    environment running the script. Graphics settings are local only.
+]]
+
+local Players = game:GetService("Players")
+local Lighting = game:GetService("Lighting")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+if not player then return end
+local playerGui = player:WaitForChild("PlayerGui")
+
+local environment = _G
+if type(getgenv) == "function" then
+    local ok, env = pcall(getgenv)
+    if ok and type(env) == "table" then environment = env end
+end
+if type(environment.AURA_VISION_CLEANUP) == "function" then
+    pcall(environment.AURA_VISION_CLEANUP)
+end
+
+local connections = {}
+local activeTweens = {}
+local originals = {}
+local customEffects = {}
+local alive = true
+local state = {
+    open = false,
+    page = "Looks",
+    preset = "Original",
+    bloom = true,
+    color = true,
+    rays = true,
+    depth = false,
+    bloomPower = .52,
+    saturation = .18,
+    contrast = .13,
+    smoothUI = true,
+}
+
+local C = {
+    bg = Color3.fromRGB(9, 12, 23),
+    card = Color3.fromRGB(21, 28, 46),
+    elevated = Color3.fromRGB(29, 38, 59),
+    white = Color3.fromRGB(242, 247, 255),
+    muted = Color3.fromRGB(135, 150, 177),
+    cyan = Color3.fromRGB(95, 224, 247),
+    lilac = Color3.fromRGB(164, 139, 253),
+    border = Color3.fromRGB(190, 223, 255),
+    green = Color3.fromRGB(104, 235, 181),
+}
+
+local function own(signal, fn)
+    local conn = signal:Connect(fn)
+    table.insert(connections, conn)
+    return conn
+end
+
+local function tween(object, time, props, style)
+    if not alive or not object then return nil end
+    if activeTweens[object] then pcall(function() activeTweens[object]:Cancel() end) end
+    local item = TweenService:Create(object, TweenInfo.new(time, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+    activeTweens[object] = item
+    item:Play()
+    return item
+end
+
+local function create(className, properties, parent)
+    local obj = Instance.new(className)
+    for key, value in pairs(properties or {}) do obj[key] = value end
+    obj.Parent = parent
+    return obj
+end
+local function rounded(obj, n)
+    return create("UICorner", {CornerRadius = UDim.new(0, n)}, obj)
+end
+local function stroke(obj, color, transparency, thickness)
+    return create("UIStroke", {
+        Color = color or C.border,
+        Transparency = transparency or .65,
+        Thickness = thickness or 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    }, obj)
+end
+local function gradient(obj, a, b, rotation)
+    return create("UIGradient", {Color = ColorSequence.new(a, b), Rotation = rotation or 0}, obj)
+end
+local function label(parent, content, size, bold, color, props)
+    local defaults = {
+        BackgroundTransparency = 1,
+        Text = content,
+        Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham,
+        TextSize = size,
+        TextColor3 = color or C.white,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }
+    for k, v in pairs(props or {}) do defaults[k] = v end
+    return create("TextLabel", defaults, parent)
+end
+
+local values = {"ClockTime", "Brightness", "Ambient", "OutdoorAmbient", "ExposureCompensation", "FogEnd", "FogStart", "FogColor", "GlobalShadows"}
+for _, property in ipairs(values) do
+    local ok, value = pcall(function() return Lighting[property] end)
+    if ok then originals[property] = value end
+end
+
+local function restoreLighting()
+    for property, value in pairs(originals) do
+        pcall(function() Lighting[property] = value end)
+    end
+end
+
+local function effect(class, name)
+    local instance = Instance.new(class)
+    instance.Name = "AURA_VISION_" .. name
+    instance.Parent = Lighting
+    table.insert(customEffects, instance)
+    return instance
+end
+
+local bloom = effect("BloomEffect", "Bloom")
+bloom.Threshold = 1.08
+bloom.Size = 35
+bloom.Intensity = state.bloomPower
+
+local color = effect("ColorCorrectionEffect", "Color")
+color.TintColor = Color3.fromRGB(255, 248, 254)
+color.Brightness = .015
+color.Saturation = state.saturation
+color.Contrast = state.contrast
+
+local rays = effect("SunRaysEffect", "SunRays")
+rays.Intensity = .085
+rays.Spread = .76
+
+local depth = effect("DepthOfFieldEffect", "Depth")
+depth.FarIntensity = .11
+depth.NearIntensity = .04
+depth.FocusDistance = 60
+depth.InFocusRadius = 45
+
+local blur = effect("BlurEffect", "MenuBlur")
+blur.Size = 0
+blur.Enabled = true
+
+local function updateEffects()
+    bloom.Enabled = state.bloom
+    color.Enabled = state.color
+    rays.Enabled = state.rays
+    depth.Enabled = state.depth
+    bloom.Intensity = state.bloomPower
+    color.Saturation = state.saturation
+    color.Contrast = state.contrast
+end
+
+local presets = {
+    ["Crystal Day"] = {
+        clock = 12.8, bright = 2.7,
+        ambient = Color3.fromRGB(125, 145, 168),
+        outdoor = Color3.fromRGB(151, 168, 197),
+        exposure = .07, fog = 25000,
+        fogColor = Color3.fromRGB(198, 227, 251),
+        tint = Color3.fromRGB(238, 249, 255),
+        hue = C.cyan,
+    },
+    ["Golden Hour"] = {
+        clock = 17.4, bright = 2.45,
+        ambient = Color3.fromRGB(172, 126, 105),
+        outdoor = Color3.fromRGB(223, 160, 112),
+        exposure = .08, fog = 17000,
+        fogColor = Color3.fromRGB(250, 192, 148),
+        tint = Color3.fromRGB(255, 238, 217),
+        hue = Color3.fromRGB(255, 185, 117),
+    },
+    ["Neon Night"] = {
+        clock = 21.8, bright = 1.75,
+        ambient = Color3.fromRGB(65, 62, 116),
+        outdoor = Color3.fromRGB(82, 94, 158),
+        exposure = .025, fog = 13000,
+        fogColor = Color3.fromRGB(35, 41, 91),
+        tint = Color3.fromRGB(221, 226, 255),
+        hue = C.lilac,
+    },
+    ["Cinematic"] = {
+        clock = 14.2, bright = 2.5,
+        ambient = Color3.fromRGB(114, 126, 148),
+        outdoor = Color3.fromRGB(143, 162, 183),
+        exposure = .04, fog = 19000,
+        fogColor = Color3.fromRGB(181, 201, 224),
+        tint = Color3.fromRGB(244, 244, 255),
+        hue = C.cyan,
+    },
+}
+
+local function applyPreset(name)
+    if name == "Original" then
+        restoreLighting()
+        color.TintColor = Color3.new(1, 1, 1)
+        state.preset = name
+        return
+    end
+    local p = presets[name]
+    if not p then return end
+    -- Changes here only affect the client's view in supported contexts.
+    Lighting.ClockTime = p.clock
+    Lighting.Brightness = p.bright
+    Lighting.Ambient = p.ambient
+    Lighting.OutdoorAmbient = p.outdoor
+    Lighting.ExposureCompensation = p.exposure
+    Lighting.FogEnd = p.fog
+    Lighting.FogColor = p.fogColor
+    Lighting.GlobalShadows = true
+    color.TintColor = p.tint
+    state.preset = name
+end
+
+local oldGui = playerGui:FindFirstChild("AURA_VISION_GLASS")
+if oldGui then oldGui:Destroy() end
+
+local gui = create("ScreenGui", {
+    Name = "AURA_VISION_GLASS",
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    DisplayOrder = 500,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+local mini = create("TextButton", {
+    Name = "FloatingMenuButton",
+    AnchorPoint = Vector2.new(1, 0),
+    Position = UDim2.new(1, -22, 0, 22),
+    Size = UDim2.fromOffset(50, 50),
+    BackgroundColor3 = Color3.fromRGB(22, 29, 51),
+    BackgroundTransparency = .09,
+    BorderSizePixel = 0,
+    Text = "A",
+    Font = Enum.Font.GothamBold,
+    TextSize = 24,
+    TextColor3 = C.white,
+    AutoButtonColor = false,
+}, gui)
+rounded(mini, 17)
+stroke(mini, C.cyan, .36, 1.5)
+gradient(mini, Color3.fromRGB(46, 72, 106), Color3.fromRGB(31, 25, 68), 95)
+local miniScale = create("UIScale", {Scale = 1}, mini)
+
+local overlay = create("TextButton", {
+    Name = "OutsideClick",
+    BackgroundColor3 = Color3.fromRGB(6, 9, 20),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    Text = "",
+    Visible = false,
+    Size = UDim2.fromScale(1, 1),
+    AutoButtonColor = false,
+}, gui)
+
+local panel = create("CanvasGroup", {
+    Name = "MainPanel",
+    Size = UDim2.fromOffset(700, 470),
+    AnchorPoint = Vector2.new(.5, .5),
+    Position = UDim2.new(.5, 0, .5, 16),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    GroupTransparency = 1,
+    Visible = false,
+    ClipsDescendants = false,
+}, gui)
+local panelScale = create("UIScale", {Scale = .94}, panel)
+local backShadow = create("Frame", {
+    Name = "Shadow",
+    Position = UDim2.fromOffset(0, 10),
+    Size = UDim2.fromScale(1, 1),
+    BackgroundColor3 = Color3.fromRGB(2, 4, 13),
+    BackgroundTransparency = .35,
+    BorderSizePixel = 0,
+}, panel)
+rounded(backShadow, 26)
+
+local base = create("Frame", {
+    Name = "LiquidGlassBase",
+    Size = UDim2.fromScale(1, 1),
+    BackgroundColor3 = C.bg,
+    BackgroundTransparency = .075,
+    BorderSizePixel = 0,
+    ClipsDescendants = true,
+}, panel)
+rounded(base, 25)
+stroke(base, C.border, .64, 1)
+gradient(base, Color3.fromRGB(25, 40, 64), Color3.fromRGB(12, 14, 30), 120)
+
+local ambientStrip = create("Frame", {
+    Name = "AquaTopGlow",
+    Position = UDim2.fromOffset(4, 4),
+    Size = UDim2.new(1, -8, 0, 2),
+    BackgroundColor3 = C.cyan,
+    BackgroundTransparency = .53,
+    BorderSizePixel = 0,
+}, base)
+rounded(ambientStrip, 3)
+gradient(ambientStrip, C.cyan, C.lilac, 0)
+
+local sidebar = create("Frame", {
+    Size = UDim2.fromOffset(195, 470),
+    BackgroundColor3 = Color3.fromRGB(8, 13, 27),
+    BackgroundTransparency = .27,
+    BorderSizePixel = 0,
+}, base)
+create("Frame", {Position = UDim2.new(1, -1, 0, 0), Size = UDim2.new(0, 1, 1, 0),
+    BorderSizePixel = 0, BackgroundColor3 = C.border, BackgroundTransparency = .89}, sidebar)
+
+local brand = label(sidebar, "AURA", 24, true, C.white, {Position=UDim2.fromOffset(22, 25), Size=UDim2.fromOffset(100, 33)})
+label(sidebar, "VISION", 10, true, C.cyan, {Position=UDim2.fromOffset(23, 56), Size=UDim2.fromOffset(130, 20)})
+label(sidebar, "VISUAL SUITE  /  v1.0", 9, false, C.muted, {Position=UDim2.fromOffset(23, 84), Size=UDim2.fromOffset(160, 14)})
+
+local sideDivider = create("Frame", {Position=UDim2.fromOffset(21, 112), Size=UDim2.fromOffset(154, 1), BackgroundColor3=C.border, BackgroundTransparency=.88, BorderSizePixel=0}, sidebar)
+label(sidebar, "WORKSPACE", 10, true, C.muted, {Position=UDim2.fromOffset(23, 132), Size=UDim2.fromOffset(160, 17)})
+
+local pageTitle = label(base, "Visual Presets", 23, true, C.white, {
+    Position = UDim2.fromOffset(222, 31), Size = UDim2.fromOffset(365, 31)
+})
+local pageDesc = label(base, "Tune the world around you", 12, false, C.muted, {
+    Position = UDim2.fromOffset(223, 68), Size = UDim2.fromOffset(390, 20)
+})
+
+local closeButton = create("TextButton", {
+    Position = UDim2.new(1, -46, 0, 29),
+    Size = UDim2.fromOffset(25, 25),
+    BackgroundColor3 = C.elevated,
+    BackgroundTransparency = .28,
+    Text = "×", Font = Enum.Font.Gotham, TextSize = 22,
+    TextColor3 = C.muted, BorderSizePixel = 0, AutoButtonColor = false,
+}, base)
+rounded(closeButton, 8)
+
+local badge = create("Frame", {
+    Position = UDim2.fromOffset(224, 109),
+    Size = UDim2.fromOffset(150, 24),
+    BackgroundColor3 = Color3.fromRGB(24, 62, 65),
+    BackgroundTransparency = .18,
+    BorderSizePixel = 0,
+}, base)
+rounded(badge, 12)
+label(badge, "●  CLIENT-SIDE ONLY", 10, true, C.green, {
+    Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -16, 1, 0)
+})
+
+local container = create("Frame", {
+    BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(220, 146),
+    Size = UDim2.fromOffset(461, 282),
+}, base)
+
+local statusBar = create("Frame", {
+    Position = UDim2.fromOffset(220, 440),
+    Size = UDim2.fromOffset(460, 1),
+    BackgroundColor3 = C.border, BackgroundTransparency = .88, BorderSizePixel = 0,
+}, base)
+local fpsText = label(base, "FPS  --", 10, true, C.muted, {
+    Position = UDim2.fromOffset(223, 446), Size = UDim2.fromOffset(95, 16)
+})
+label(base, "INSERT  ·  SHOW / HIDE", 10, false, C.muted, {
+    TextXAlignment = Enum.TextXAlignment.Right,
+    Position = UDim2.fromOffset(449, 446), Size = UDim2.fromOffset(227, 16)
+})
+
+local pages = {}
+for _, pageName in ipairs({"Looks", "Effects", "Controls"}) do
+    local scroll = create("ScrollingFrame", {
+        Name = pageName,
+        Position = UDim2.fromOffset(0, 0),
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        CanvasSize = UDim2.fromOffset(0, 0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollBarThickness = 3,
+        ScrollBarImageColor3 = C.lilac,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        Visible = (pageName == "Looks"),
+    }, container)
+    create("UIListLayout", {Padding=UDim.new(0, 9), SortOrder=Enum.SortOrder.LayoutOrder}, scroll)
+    create("UIPadding", {PaddingTop=UDim.new(0, 2), PaddingBottom=UDim.new(0, 10), PaddingRight=UDim.new(0, 7)}, scroll)
+    pages[pageName] = scroll
+end
+
+local tabButtons = {}
+local tabMeta = {
+    Looks = {title="Visual Presets", sub="Choose a new atmosphere", symbol="◈"},
+    Effects = {title="Post Processing", sub="Fine-tune light, color and focus", symbol="✦"},
+    Controls = {title="Interface & Settings", sub="Manage the experience", symbol="☷"},
+}
+local function selectPage(name)
+    state.page = name
+    for key, scroll in pairs(pages) do scroll.Visible = (key == name) end
+    local meta = tabMeta[name]
+    pageTitle.Text = meta.title
+    pageDesc.Text = meta.sub
+    for key, btn in pairs(tabButtons) do
+        local isActive = key == name
+        tween(btn.bg, .2, {BackgroundTransparency = isActive and .02 or 1})
+        tween(btn.title, .2, {TextColor3 = isActive and C.white or C.muted})
+        btn.bar.Visible = isActive
+    end
+end
+
+for index, name in ipairs({"Looks", "Effects", "Controls"}) do
+    local y = 164 + (index-1)*55
+    local hit = create("TextButton", {
+        Name = name .. "Tab", Position = UDim2.fromOffset(14, y),
+        Size = UDim2.fromOffset(167, 46),
+        BackgroundTransparency = 1, Text="", AutoButtonColor=false,
+    }, sidebar)
+    local tile = create("Frame", {Size=UDim2.fromScale(1, 1), BackgroundColor3=Color3.fromRGB(46, 73, 107), BackgroundTransparency=1, BorderSizePixel=0}, hit)
+    rounded(tile, 11)
+    local bar = create("Frame", {Size=UDim2.fromOffset(3, 22), Position=UDim2.fromOffset(0, 12), BackgroundColor3=C.cyan, BorderSizePixel=0, Visible=false}, hit)
+    rounded(bar, 3)
+    label(hit, tabMeta[name].symbol, 20, false, C.cyan, {Position=UDim2.fromOffset(13, 0), Size=UDim2.fromOffset(30, 46), TextXAlignment=Enum.TextXAlignment.Center})
+    local txt = label(hit, name=="Looks" and "Presets" or name=="Effects" and "Effects" or "Settings", 13, true, C.muted, {Position=UDim2.fromOffset(50, 0), Size=UDim2.fromOffset(99, 46)})
+    tabButtons[name] = {bg=tile, bar=bar, title=txt}
+    own(hit.MouseButton1Click, function() selectPage(name) end)
+    own(hit.MouseEnter, function() if state.page ~= name then tween(tile, .2, {BackgroundTransparency=.75}) end end)
+    own(hit.MouseLeave, function() if state.page ~= name then tween(tile, .2, {BackgroundTransparency=1}) end end)
+end
+
+local bottomPill = create("Frame", {
+    Position = UDim2.fromOffset(17, 414), Size = UDim2.fromOffset(162, 37),
+    BackgroundColor3 = Color3.fromRGB(26, 41, 59),
+    BackgroundTransparency = .3, BorderSizePixel = 0,
+}, sidebar)
+rounded(bottomPill, 12)
+stroke(bottomPill, C.border, .87, 1)
+label(bottomPill, "●", 13, true, C.green, {Position=UDim2.fromOffset(12, 1), Size=UDim2.fromOffset(17, 34)})
+label(bottomPill, "VISUALS ACTIVE", 10, true, C.white, {Position=UDim2.fromOffset(32, 0), Size=UDim2.fromOffset(122, 37)})
+
+local presetCards = {}
+local function presetCard(name, hint, sceneColor, order)
+    local host = pages.Looks
+    local button = create("TextButton", {
+        LayoutOrder=order, Size=UDim2.new(1, -3, 0, 63),
+        BackgroundColor3 = C.card, BackgroundTransparency = .26,
+        BorderSizePixel=0, Text="", AutoButtonColor=false,
+    }, host)
+    rounded(button, 14)
+    local edge = stroke(button, C.border, .86, 1)
+    local art = create("Frame", {
+        Position=UDim2.fromOffset(9, 8), Size=UDim2.fromOffset(48, 47),
+        BackgroundColor3 = sceneColor, BorderSizePixel=0,
+    }, button)
+    rounded(art, 11)
+    gradient(art, sceneColor, Color3.fromRGB(18, 25, 49), 125)
+    label(art, "✦", 22, false, C.white, {Size=UDim2.fromScale(1,1), TextXAlignment=Enum.TextXAlignment.Center})
+    label(button, name, 14, true, C.white, {Position=UDim2.fromOffset(68, 9), Size=UDim2.new(1, -100, 23)})
+    label(button, hint, 10, false, C.muted, {Position=UDim2.fromOffset(68, 34), Size=UDim2.new(1, -100, 16)})
+    local indicator = label(button, "○", 22, false, C.muted, {Position=UDim2.new(1, -40, 0, 17), Size=UDim2.fromOffset(28, 28)})
+    presetCards[name] = {edge=edge, indicator=indicator, button=button}
+    own(button.MouseButton1Click, function()
+        applyPreset(name)
+        for key, card in pairs(presetCards) do
+            local checked = key == name
+            card.indicator.Text = checked and "●" or "○"
+            card.indicator.TextColor3 = checked and C.cyan or C.muted
+            tween(card.edge, .25, {Transparency = checked and .27 or .86, Color=checked and C.cyan or C.border})
+        end
+    end)
+    own(button.MouseEnter, function() tween(button, .2, {BackgroundTransparency=.04}) end)
+    own(button.MouseLeave, function() tween(button, .2, {BackgroundTransparency=.26}) end)
+end
+
+presetCard("Cinematic", "Balanced movie-like image", Color3.fromRGB(69, 160, 193), 1)
+presetCard("Crystal Day", "Bright daylight · crisp blue", Color3.fromRGB(93, 200, 247), 2)
+presetCard("Golden Hour", "Warm light · soft shadows", Color3.fromRGB(247, 159, 81), 3)
+presetCard("Neon Night", "Moody night · violet glow", Color3.fromRGB(112, 90, 228), 4)
+presetCard("Original", "Restore the game's own light", Color3.fromRGB(110, 120, 145), 5)
+
+local switches = {}
+local function switchRow(key, title, description, order)
+    local row = create("Frame", {LayoutOrder=order, Size=UDim2.new(1, -3, 0, 64), BackgroundColor3=C.card, BackgroundTransparency=.26, BorderSizePixel=0}, pages.Effects)
+    rounded(row, 13)
+    stroke(row, C.border, .91, 1)
+    label(row, title, 13, true, C.white, {Position=UDim2.fromOffset(14, 7), Size=UDim2.new(1, -95, 23)})
+    label(row, description, 10, false, C.muted, {Position=UDim2.fromOffset(14, 31), Size=UDim2.new(1, -95, 20)})
+    local button = create("TextButton", {AnchorPoint=Vector2.new(1,.5), Position=UDim2.new(1,-13,.5,0), Size=UDim2.fromOffset(52,28), BackgroundColor3=C.elevated, BorderSizePixel=0, Text="", AutoButtonColor=false}, row)
+    rounded(button, 14)
+    local dot = create("Frame", {Size=UDim2.fromOffset(20,20), Position=UDim2.fromOffset(4,4), BackgroundColor3=C.white, BorderSizePixel=0}, button)
+    rounded(dot, 10)
+    local function refresh(animated)
+        local enabled = state[key]
+        local p = enabled and UDim2.fromOffset(28,4) or UDim2.fromOffset(4,4)
+        local bg = enabled and C.cyan or C.elevated
+        if animated then
+            tween(button, .25, {BackgroundColor3=bg})
+            tween(dot, .25, {Position=p})
+        else
+            button.BackgroundColor3 = bg
+            dot.Position = p
+        end
+    end
+    switches[key] = refresh
+    own(button.MouseButton1Click, function()
+        state[key] = not state[key]
+        updateEffects()
+        refresh(true)
+    end)
+    refresh(false)
+end
+
+switchRow("bloom", "Soft Bloom", "Gentle glow around bright objects", 1)
+switchRow("color", "Color Grading", "Richer, cleaner cinematic tones", 2)
+switchRow("rays", "Sun Rays", "Subtle rays from sunlight", 3)
+switchRow("depth", "Depth of Field", "Lens focus · may soften the scene", 4)
+
+local sliderRefresh = {}
+local function sliderRow(name, description, key, minVal, maxVal, order, formatter)
+    local host = pages.Effects
+    local row = create("Frame", {LayoutOrder=order, Size=UDim2.new(1,-3,0,76), BackgroundColor3=C.card, BackgroundTransparency=.26, BorderSizePixel=0}, host)
+    rounded(row, 13)
+    stroke(row, C.border, .91, 1)
+    label(row, name, 13, true, C.white, {Position=UDim2.fromOffset(14, 7), Size=UDim2.new(1,-105,23)})
+    local readout = label(row, "", 12, true, C.cyan, {Position=UDim2.new(1,-92,0,9), Size=UDim2.fromOffset(77,20), TextXAlignment=Enum.TextXAlignment.Right})
+    label(row, description, 10, false, C.muted, {Position=UDim2.fromOffset(14,29), Size=UDim2.new(1,-25,17)})
+    local track = create("Frame", {Position=UDim2.new(0,14,1,-15), Size=UDim2.new(1,-28,0,5), BackgroundColor3=Color3.fromRGB(53,63,85), BorderSizePixel=0, Active=true}, row)
+    rounded(track, 3)
+    local fill = create("Frame", {Size=UDim2.fromScale(.5,1), BackgroundColor3=C.cyan, BorderSizePixel=0}, track)
+    rounded(fill, 3)
+    gradient(fill, C.cyan, C.lilac, 0)
+    local circle = create("Frame", {AnchorPoint=Vector2.new(.5,.5), Position=UDim2.fromScale(.5,.5), Size=UDim2.fromOffset(14,14), BackgroundColor3=C.white, BorderSizePixel=0}, track)
+    rounded(circle, 7)
+    local dragging = false
+    local touchInput = nil
+    local function refresh()
+        local pct = math.clamp((state[key]-minVal)/(maxVal-minVal), 0, 1)
+        fill.Size = UDim2.fromScale(pct, 1)
+        circle.Position = UDim2.fromScale(pct, .5)
+        readout.Text = formatter(state[key])
+    end
+    local function setAt(x)
+        if track.AbsoluteSize.X < 1 then return end
+        local pct = math.clamp((x - track.AbsolutePosition.X)/track.AbsoluteSize.X, 0, 1)
+        state[key] = minVal + (maxVal-minVal)*pct
+        updateEffects()
+        refresh()
+    end
+    own(track.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            touchInput = input.UserInputType == Enum.UserInputType.Touch and input or nil
+            setAt(input.Position.X)
+        end
+    end)
+    own(UserInputService.InputChanged, function(input)
+        if not dragging then return end
+        if touchInput and input == touchInput then
+            setAt(input.Position.X)
+        elseif not touchInput and input.UserInputType == Enum.UserInputType.MouseMovement then
+            setAt(input.Position.X)
+        end
+    end)
+    own(UserInputService.InputEnded, function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or (touchInput and input == touchInput)) then
+            dragging = false
+            touchInput = nil
+        end
+    end)
+    sliderRefresh[key] = refresh
+    refresh()
+end
+sliderRow("Bloom strength", "Glow intensity", "bloomPower", 0, 1.4, 5, function(v) return tostring(math.floor(v / 1.4 * 100 + .5)) .. "%" end)
+sliderRow("Saturation", "Color boost", "saturation", -.15, .6, 6, function(v) return tostring(math.floor((v+.15)/.75*100 + .5)) .. "%" end)
+sliderRow("Contrast", "Light / dark balance", "contrast", -.08, .32, 7, function(v) return tostring(math.floor((v+.08)/.40*100 + .5)) .. "%" end)
+
+local function settingsTile(title, description, actionText, callback, order)
+    local row = create("Frame", {LayoutOrder=order, Size=UDim2.new(1,-3,0,78), BackgroundColor3=C.card, BackgroundTransparency=.26, BorderSizePixel=0}, pages.Controls)
+    rounded(row, 13)
+    stroke(row, C.border, .91, 1)
+    label(row, title, 13, true, C.white, {Position=UDim2.fromOffset(14,8), Size=UDim2.new(1,-28,21)})
+    label(row, description, 10, false, C.muted, {Position=UDim2.fromOffset(14,31), Size=UDim2.new(1,-145,34), TextWrapped=true, TextYAlignment=Enum.TextYAlignment.Top})
+    local btn = create("TextButton", {AnchorPoint=Vector2.new(1,.5), Position=UDim2.new(1,-12,.5,9), Size=UDim2.fromOffset(110,30), BackgroundColor3=Color3.fromRGB(51,70,100), BackgroundTransparency=.1, Text=actionText, TextColor3=C.white, TextSize=11, Font=Enum.Font.GothamBold, BorderSizePixel=0, AutoButtonColor=false}, row)
+    rounded(btn, 10)
+    own(btn.MouseButton1Click, callback)
+end
+
+settingsTile("Restore defaults", "Bring back the game's original lighting and turn off all added effects.", "RESTORE", function()
+    applyPreset("Original")
+    state.bloom, state.color, state.rays, state.depth = false, false, false, false
+    updateEffects()
+    for _, fn in pairs(switches) do fn(true) end
+    for name, card in pairs(presetCards) do
+        local checked = name == "Original"
+        card.indicator.Text = checked and "●" or "○"
+        card.indicator.TextColor3 = checked and C.cyan or C.muted
+        tween(card.edge,.25,{Transparency=checked and .27 or .86})
+    end
+end, 1)
+
+settingsTile("Effects only", "Use the game's own time of day while keeping your chosen graphic filters.", "USE ORIGINAL", function()
+    applyPreset("Original")
+    for name, card in pairs(presetCards) do
+        local checked = name == "Original"
+        card.indicator.Text = checked and "●" or "○"
+        card.indicator.TextColor3 = checked and C.cyan or C.muted
+        tween(card.edge,.25,{Transparency=checked and .27 or .86})
+    end
+end, 2)
+
+settingsTile("Close menu", "Hide this window without removing the graphic effects.", "HIDE", function()
+    -- assigned later via the same toggle function
+    if type(environment.AURA_VISION_TOGGLE) == "function" then environment.AURA_VISION_TOGGLE(false) end
+end, 3)
+
+settingsTile("Unload AURA", "Remove the overlay and restore lighting from before the script ran.", "UNLOAD", function()
+    if type(environment.AURA_VISION_CLEANUP) == "function" then environment.AURA_VISION_CLEANUP() end
+end, 4)
+
+local desiredScale = 1
+local function setOpen(open)
+    if not alive then return end
+    state.open = open
+    if open then
+        overlay.Visible = true
+        panel.Visible = true
+        panel.GroupTransparency = 1
+        panel.Position = UDim2.new(.5, 0, .5, 17)
+        panelScale.Scale = desiredScale * .92
+        tween(panel, .38, {GroupTransparency=0, Position=UDim2.new(.5,0,.5,0)})
+        tween(panelScale, .42, {Scale=desiredScale}, Enum.EasingStyle.Back)
+        tween(overlay, .25, {BackgroundTransparency=.46})
+        tween(blur, .42, {Size=7})
+    else
+        tween(overlay, .24, {BackgroundTransparency=1})
+        tween(blur, .28, {Size=0})
+        local fade = tween(panel, .25, {GroupTransparency=1, Position=UDim2.new(.5,0,.5,12)})
+        tween(panelScale, .25, {Scale=desiredScale * .94})
+        if fade then own(fade.Completed, function()
+            if alive and not state.open then
+                panel.Visible = false
+                overlay.Visible = false
+            end
+        end) end
+    end
+end
+
+environment.AURA_VISION_TOGGLE = setOpen
+own(mini.MouseButton1Click, function() setOpen(not state.open) end)
+own(overlay.MouseButton1Click, function() setOpen(false) end)
+own(closeButton.MouseButton1Click, function() setOpen(false) end)
+own(mini.MouseEnter, function() tween(miniScale, .2, {Scale=1.09}) end)
+own(mini.MouseLeave, function() tween(miniScale, .2, {Scale=1}) end)
+own(UserInputService.InputBegan, function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.Insert then
+        setOpen(not state.open)
+    end
+end)
+
+-- Drag panel by its top bar (mouse or touch).
+local draggingPanel = false
+local dragStart = nil
+local startPosition = nil
+local dragTouch = nil
+local dragHandle = create("Frame", {Position=UDim2.fromOffset(196,0), Size=UDim2.new(1,-260,0,25), BackgroundTransparency=1, Active=true}, base)
+own(dragHandle.InputBegan, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingPanel = true
+        dragStart = input.Position
+        startPosition = panel.Position
+        dragTouch = input.UserInputType == Enum.UserInputType.Touch and input or nil
+    end
+end)
+own(UserInputService.InputChanged, function(input)
+    if not draggingPanel then return end
+    if (dragTouch and input == dragTouch) or (not dragTouch and input.UserInputType == Enum.UserInputType.MouseMovement) then
+        local delta = input.Position - dragStart
+        panel.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y)
+    end
+end)
+own(UserInputService.InputEnded, function(input)
+    if (dragTouch and input == dragTouch) or (not dragTouch and input.UserInputType == Enum.UserInputType.MouseButton1) then
+        draggingPanel = false
+        dragTouch = nil
+    end
+end)
+
+-- Automatically shrink the panel to fit smaller screens.
+local function fitScreen()
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    local viewport = camera.ViewportSize
+    local scale = math.min(1, (viewport.X - 24)/710, (viewport.Y - 28)/482)
+    if scale > 0 then
+        desiredScale = scale
+        panelScale.Scale = state.open and desiredScale or desiredScale * .94
+    end
+end
+fitScreen()
+if workspace.CurrentCamera then
+    own(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"), fitScreen)
+end
+
+local frameCount, frameWindowStart = 0, os.clock()
+own(RunService.RenderStepped, function()
+    frameCount = frameCount + 1
+    local now = os.clock()
+    if now - frameWindowStart >= .5 then
+        local fps = math.floor(frameCount / (now-frameWindowStart) + .5)
+        fpsText.Text = "FPS  " .. tostring(fps)
+        frameCount, frameWindowStart = 0, now
+    end
+end)
+
+local function cleanup()
+    if not alive then return end
+    alive = false
+    for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
+    for _, item in pairs(activeTweens) do pcall(function() item:Cancel() end) end
+    restoreLighting()
+    for _, item in ipairs(customEffects) do pcall(function() item:Destroy() end) end
+    pcall(function() gui:Destroy() end)
+    environment.AURA_VISION_CLEANUP = nil
+    environment.AURA_VISION_TOGGLE = nil
+end
+environment.AURA_VISION_CLEANUP = cleanup
+
+selectPage("Looks")
+updateEffects()
+applyPreset("Cinematic")
+local selected = presetCards.Cinematic
+if selected then
+    selected.indicator.Text = "●"
+    selected.indicator.TextColor3 = C.cyan
+    selected.edge.Transparency = .27
+    selected.edge.Color = C.cyan
+end
+-- Start visible so the user can see the glass UI immediately.
+setOpen(true)
+print("[AURA VISION] Ready. Press INSERT to toggle. Effects are local only.")
